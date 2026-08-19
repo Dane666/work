@@ -1,0 +1,377 @@
+# -*- coding: utf-8 -*-
+"""
+sim_tracker.py — V8.1 模拟盘净值跟踪器（每日盘后执行）
+================================================================
+
+与 signal_generator.py 配套：读取信号清单，按「买入价=次日开盘价 / 卖出价=当日收盘价」
+并扣除分档滑点（中证500>5亿=0.10% / 创业板1-5亿=0.30% / 其他<1亿=0.50%，买卖各一次）
+模拟交易，逐日记录账户净值，并与 CSI300 基准对比。
+
+V8.1 升级（2026-08-19）：BUY 建仓按信号 CSV 的 target_weight 列分配现金
+  （V8 段每只 10%；combo 段每只约 1.11%、重叠股 2.22%，单只上限 10%），
+  总部署受 regime_weight 市场门控约束 —— 与 V8.1 回测权重口径一致。
+  调用方式不变（run_daily.sh 无需改动）。
+
+执行时序（T+1 风格，与 A 股实际成交一致）：
+  - 盘后 signal_generator 生成「次日信号」（dated D）。
+  - 次日（D+1）盘后 sim_tracker 读取该信号：
+        * 开盘价 执行 BUY（按 target_weight 权重、regime_weight 现金上限建仓）
+        * 收盘价 执行 SELL（清仓跌出目标持仓的标的）
+        * 以收盘价标记持仓市值 → 记录当日 NAV
+
+输出：
+  output/sim_nav/YYYY-MM-DD_nav.csv
+    列: date, nav, cash, position_value, benchmark_nav,
+        daily_return, cum_return, tracking_error(滚动20日 vs CSI300)
+
+状态：
+  output/sim_nav/sim_state.json  —— 跨日持仓 / 现金 / 待成交单（保证每日增量正确）。
+
+用法：
+  cd src
+  python sim_tracker.py --init --date 2025-08-12   # 初始化（记录开盘前状态，挂起待成交）
+  python sim_tracker.py --date 2025-08-13          # 次日执行（需 D+1 行情）
+  python sim_tracker.py                            # 默认用最新信号 + 今日日期
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import json
+import argparse
+from datetime import datetime, timedelta
+
+for _k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+           "ALL_PROXY", "all_proxy"]:
+    os.environ.pop(_k, None)
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import numpy as np
+import pandas as pd
+
+import config
+from stress_test_v6 import build_slippage_map
+
+
+NAV_DIR = config.OUTPUT_DIR / "sim_nav"
+SIGNAL_DIR = config.OUTPUT_DIR / "signals"
+STATE_FILE = NAV_DIR / "sim_state.json"
+
+# 锁定滑点模型（与 V7.1 完全一致）
+FIXED_WEIGHT = config.FIXED_WEIGHT          # 0.10
+TRACK_WINDOW = 20                          # 滚动跟踪误差窗口（交易日）
+
+
+# ---------------------------------------------------------------------------
+# 价格获取（实时模式用 akshare 双源；离线/初始化无未来数据则回退 None → 挂起）
+# ---------------------------------------------------------------------------
+def fetch_day_prices(codes, date: pd.Timestamp) -> dict:
+    """返回 {code: {'open':, 'close':}}；联网失败或当日无数据返回 {}。
+
+    V8.1 修复①：新浪兜底必须用「带日期范围」调用（stock_zh_a_daily(start_date/end_date)），
+    其返回 df 的 date 是普通列而非索引；旧版用 df.index 过滤（全历史版 index 为
+    RangeIndex，与 Timestamp 比较抛异常）导致静默失败、永远拉不到行情。
+    V8.1 修复②：单只请求可能瞬时失败（新浪对部分代码响应超时/限流），
+    失败重试 retries 次（间隔 0.4s），确保批量 88 只时覆盖完整。
+    """
+    import time
+    try:
+        import akshare as ak
+        out = {}
+        d0 = (date - pd.Timedelta(days=5)).strftime("%Y%m%d")
+        d1 = date.strftime("%Y%m%d")
+        for code in codes:
+            df = None
+            try:
+                df = ak.stock_zh_a_hist(symbol=code, period="daily",
+                                        start_date=d0, end_date=d1, adjust="qfq")
+            except Exception:
+                df = None
+            if df is None or len(df) == 0:
+                prefix = ("sh" if code.startswith(("6", "9")) else
+                          "bj" if code.startswith(("8", "4")) else "sz")
+                for attempt in range(3):
+                    try:
+                        df = ak.stock_zh_a_daily(symbol=prefix + code,
+                                                 start_date=d0, end_date=d1, adjust="qfq")
+                    except Exception:
+                        df = None
+                    if df is not None and len(df) > 0:
+                        break
+                    time.sleep(0.4)
+            if df is None or len(df) == 0:
+                continue
+            df = df.rename(columns={"日期": "date", "开盘": "open", "收盘": "close"})
+            if "date" not in df.columns:          # 新浪源：date 已是列名；东财源已 rename
+                df = df.reset_index().rename(columns={"index": "date"})
+            df["date"] = pd.to_datetime(df["date"])
+            row = df[df["date"] == date]
+            if len(row) == 1:
+                out[code] = {"open": float(row["open"].iloc[0]),
+                             "close": float(row["close"].iloc[0])}
+        return out
+    except Exception as e:
+        print(f"[{datetime.now()}] 行情获取失败（{e}），本次仅记录挂起状态。")
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# 状态读写
+# ---------------------------------------------------------------------------
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    return {"init_date": None, "cash": 1.0, "positions": {},
+            "nav": 1.0, "pending_buys": [], "pending_sells": [],
+            "last_nav_date": None}
+
+
+def save_state(st):
+    NAV_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 基准（CSI300）净值
+# ---------------------------------------------------------------------------
+def load_benchmark(base_date=None) -> pd.Series:
+    """CSI300 净值，重定基到模拟盘起始日（base_date）为 1.0，便于跟踪误差对比。
+
+    若 base_date 超出数据末日（如初始化日 2025-08-14 > 数据末日 2025-08-12），
+    则取末日定基，起始日净值记为 1.0。
+    """
+    idx = pd.read_parquet(config.DATA_DIR / "v6_index.parquet")
+    if isinstance(idx, pd.DataFrame):
+        idx = idx.iloc[:, 0]
+    idx = idx.dropna()
+    if base_date is not None:
+        bd = min(pd.Timestamp(base_date), idx.index[-1])
+        base_val = idx.loc[bd]
+    else:
+        base_val = idx.iloc[0]
+    return (idx / base_val).rename("benchmark_nav")
+
+
+# ---------------------------------------------------------------------------
+# 执行一笔信号日的模拟交易
+# ---------------------------------------------------------------------------
+def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
+                state: dict, slip_map: dict, prices: dict):
+    """按信号在 date 日成交，更新 state，返回当日 NAV 信息。
+
+    V8.1 升级：BUY 建仓按信号 CSV 的 target_weight 列分配现金
+    （V8 段每只 10%；combo 段每只约 1.11%，重叠股 2.22%；单只上限 10%），
+    总部署受 regime_weight 现金上限约束（与 V8.1 回测一致）。
+    """
+    # 开盘：执行 BUY（按信号顺序 + target_weight 权重 + regime_weight 现金上限）
+    regime_w = float(signal_df["regime_weight"].iloc[0]) / 100.0 if len(signal_df) else 1.0
+    buys = [r for _, r in signal_df.iterrows() if r["action"] == "BUY"]
+    sells = [r for _, r in signal_df.iterrows() if r["action"] == "SELL"]
+
+    cash = state["cash"]
+    positions = dict(state["positions"])
+    cap = state["nav"]  # 当前账户总净值（Fraction 基准 1.0）
+
+    budget = regime_w * cap          # 本周期可部署上限（现金口径，市场门控）
+    deployed = sum(h["shares"] * h["cost"] for h in positions.values())  # 现有持仓实际占用现金
+
+    for r in buys:
+        c = str(r["code"])
+        if c in positions:
+            continue
+        if deployed >= budget - 1e-9:               # 浮点容差，确保不超预算
+            break
+        p = prices.get(c)
+        if p is None:
+            continue
+        slip = slip_map.get(c, 0.0050)
+        buy_price = p["open"] * (1 + slip)          # 买入滑点（加价）
+        # V8.1：按信号 target_weight 分配现金（缺失时回退固定 10%）
+        try:
+            w = float(r["target_weight"]) / 100.0
+            if not (w > 0) or w != w:
+                w = FIXED_WEIGHT
+        except (KeyError, TypeError, ValueError):
+            w = FIXED_WEIGHT
+        w = min(w, FIXED_WEIGHT)                    # 单只上限 10%（与 V8.1 一致）
+        alloc = min(w * cap, budget - deployed)
+        if alloc <= 1e-9 or buy_price <= 0:
+            continue
+        shares = alloc / buy_price
+        positions[c] = {"shares": shares, "cost": buy_price}
+        cash -= alloc
+        deployed += alloc
+
+    # 收盘：执行 SELL（清仓跌出 Top30 的标的）
+    for r in sells:
+        c = str(r["code"])
+        if c not in positions:
+            continue
+        p = prices.get(c)
+        if p is None:
+            continue
+        slip = slip_map.get(c, 0.0050)
+        sell_price = p["close"] * (1 - slip)        # 卖出滑点（减价）
+        proceeds = positions[c]["shares"] * sell_price
+        cash += proceeds
+        del positions[c]
+
+    # 以收盘价标记持仓市值
+    pos_val = 0.0
+    for c, h in positions.items():
+        p = prices.get(c)
+        if p is not None:
+            pos_val += h["shares"] * p["close"]
+        else:
+            pos_val += h["shares"] * h["cost"]      # 无当日价则沿用成本
+    nav = cash + pos_val
+    return {"cash": cash, "positions": positions, "nav": nav, "pos_val": pos_val}
+
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser(description="V7.1 模拟盘净值跟踪器")
+    ap.add_argument("--init", action="store_true", help="初始化（记录开盘前状态）")
+    ap.add_argument("--date", type=str, default=None, help="执行日（默认=今日）")
+    ap.add_argument("--signal-date", type=str, default=None,
+                    help="指定读取的信号文件日期（默认=执行日之前最近一份）")
+    args = ap.parse_args()
+
+    NAV_DIR.mkdir(parents=True, exist_ok=True)
+    as_of = (pd.Timestamp(args.date) if args.date
+             else pd.Timestamp(datetime.now().strftime("%Y-%m-%d")))
+
+    # 定位信号文件
+    sig_files = sorted(f for f in os.listdir(SIGNAL_DIR)
+                       if f.endswith("_signal.csv")) if os.path.isdir(SIGNAL_DIR) else []
+    if not sig_files:
+        print(f"[{datetime.now()}] 无信号文件，请先运行 signal_generator.py")
+        return
+    if args.signal_date:
+        sig_name = f"{args.signal_date}_signal.csv"
+    else:
+        # 取执行日之前（含）最近一份
+        cand = [f for f in sig_files
+                if pd.Timestamp(f.replace("_signal.csv", "")) <= as_of]
+        sig_name = cand[-1] if cand else sig_files[-1]
+    sig_df = pd.read_csv(SIGNAL_DIR / sig_name, dtype={"code": str})
+    print(f"[{datetime.now()}] 读取信号: {sig_name}（执行日={as_of.date()}）")
+
+    # 滑点分级（与 V7.1 一致，仅成本模型，非信号）
+    amount = pd.read_parquet(config.DATA_DIR / "v6_amount_panel.parquet")
+    slip_map, _ = build_slippage_map(amount)
+
+    state = load_state()
+    if args.init and state["init_date"] is None:
+        state["init_date"] = str(as_of.date())
+
+    # 试图获取执行日价格
+    codes_all = list(sig_df["code"].astype(str))
+    prices = fetch_day_prices(codes_all, as_of) if not args.init else {}
+
+    if not prices:
+        # 无可成交行情（初始化 / 离线）：记录挂起状态，不实际建仓
+        state["pending_buys"] = list(sig_df[sig_df["action"] == "BUY"]["code"].astype(str))
+        state["pending_sells"] = list(sig_df[sig_df["action"] == "SELL"]["code"].astype(str))
+        save_state(state)
+        bench = load_benchmark(state.get("init_date") or as_of)
+        b_nav = float(bench.get(as_of, bench.iloc[-1])) if as_of in bench.index else 1.0
+        row = {
+            "date": as_of.strftime("%Y-%m-%d"),
+            "nav": round(state["nav"], 6),
+            "cash": round(state["cash"], 6),
+            "position_value": 0.0,
+            "benchmark_nav": round(b_nav, 6),
+            "daily_return": 0.0,
+            "cum_return": round(state["nav"] - 1.0, 6),
+            "tracking_error": float("nan"),
+            "note": "pending(无执行日行情，挂起待成交)",
+        }
+        _append_nav(row)
+        print(f"[{datetime.now()}] 初始化：账户净值={state['nav']:.4f} 现金=100% "
+              f"挂起买入 {len(state['pending_buys'])} 只（待下一交易日开盘价成交）")
+        return
+
+    # 有行情：执行成交
+    res = execute_day(sig_df, as_of, state, slip_map, prices)
+    state["cash"] = res["cash"]
+    state["positions"] = {c: {"shares": float(h["shares"]), "cost": float(h["cost"])}
+                          for c, h in res["positions"].items()}
+    state["nav"] = res["nav"]
+    state["pending_buys"] = []
+    state["pending_sells"] = []
+    save_state(state)
+
+    # 基准 & 跟踪误差
+    bench = load_benchmark(state.get("init_date") or as_of)
+    b_nav = float(bench.get(as_of, bench.iloc[-1])) if as_of in bench.index else bench.iloc[-1]
+    nav_hist = _read_nav()
+    prev_nav = nav_hist["nav"].iloc[-2] if len(nav_hist) >= 2 else 1.0
+    daily_ret = res["nav"] / prev_nav - 1 if prev_nav else 0.0
+    cum_ret = res["nav"] - 1.0
+    te = _rolling_tracking_error(nav_hist, bench, as_of)
+    row = {
+        "date": as_of.strftime("%Y-%m-%d"),
+        "nav": round(res["nav"], 6),
+        "cash": round(res["cash"], 6),
+        "position_value": round(res["pos_val"], 6),
+        "benchmark_nav": round(float(b_nav), 6),
+        "daily_return": round(float(daily_ret), 6),
+        "cum_return": round(float(cum_ret), 6),
+        "tracking_error": round(float(te), 6) if te == te else float("nan"),
+    }
+    _append_nav(row)
+    print(f"[{datetime.now()}] 执行完成：NAV={res['nav']:.4f} 现金={res['cash']:.2%} "
+          f"持仓市值={res['pos_val']:.4f} 累计收益={cum_ret:+.2%} "
+          f"跟踪误差(20日)={te if te==te else 'NA'}")
+
+
+def _read_nav() -> pd.DataFrame:
+    p = NAV_DIR / "sim_nav_history.csv"
+    if p.exists():
+        return pd.read_csv(p)
+    return pd.DataFrame(columns=["date", "nav", "cash", "position_value",
+                                 "benchmark_nav", "daily_return", "cum_return",
+                                 "tracking_error"])
+
+
+def _append_nav(row: dict):
+    hist = _read_nav()
+    # 同日期覆盖
+    hist = hist[hist["date"] != row["date"]]
+    hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+    hist = hist.sort_values("date").reset_index(drop=True)
+    NAV_DIR.mkdir(parents=True, exist_ok=True)
+    hist.to_csv(NAV_DIR / "sim_nav_history.csv", index=False, encoding="utf-8")
+    # 同时输出按日的明细文件（用户要求的 YYYY-MM-DD_nav.csv）
+    pd.DataFrame([row]).to_csv(
+        NAV_DIR / f"{row['date']}_nav.csv", index=False, encoding="utf-8")
+    print(f"[{datetime.now()}] NAV 已记录: {NAV_DIR / (row['date'] + '_nav.csv')}")
+
+
+def _rolling_tracking_error(nav_hist: pd.DataFrame, bench: pd.Series,
+                            as_of: pd.Timestamp) -> float:
+    """滚动 20 日 sim 日收益与 CSI300 日收益的跟踪误差（std）。"""
+    if len(nav_hist) < 2 or as_of not in bench.index:
+        return float("nan")
+    nav_hist = nav_hist.copy()
+    nav_hist["date"] = pd.to_datetime(nav_hist["date"])
+    # 对齐到交易日序列
+    merged = pd.DataFrame({"nav": nav_hist.set_index("date")["nav"]})
+    merged["bench"] = bench.reindex(merged.index).ffill()
+    merged["r_sim"] = merged["nav"].pct_change()
+    merged["r_b"] = merged["bench"].pct_change()
+    merged["te"] = merged["r_sim"] - merged["r_b"]
+    win = merged["te"].dropna().tail(TRACK_WINDOW)
+    if len(win) < 2:
+        return float("nan")
+    return float(win.std(ddof=0))
+
+
+if __name__ == "__main__":
+    main()

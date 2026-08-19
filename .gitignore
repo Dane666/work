@@ -1,0 +1,16 @@
+# 数据资产（308MB，不入 git；云服务器/github cache 持久化）
+data/
+# 运行输出（报告/信号/净值/日志）
+output/
+# WorkBuddy 项目内部数据（记忆/技能，不入公开库）
+.workbuddy/
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# 日志
+logs/
+*.log
+# 系统
+.DS_Store

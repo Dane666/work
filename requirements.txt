@@ -1,0 +1,11 @@
+# V8.1 A股多因子策略 —— Python 依赖（GitHub Actions / Docker / 云服务器部署用）
+# 版本为下限约束；已在本项目 2018-2025 全区间回测环境验证（Python 3.10~3.13）。
+akshare>=1.12.0
+pandas>=2.0.0
+numpy>=1.24.0
+lightgbm>=4.0.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+# parquet 读写必需（v8_close_panel / v8_ohlcv.pkl 之外的全部面板均以 parquet 落盘）
+pyarrow>=14.0.0

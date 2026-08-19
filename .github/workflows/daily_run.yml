@@ -1,0 +1,69 @@
+# V8.1 每日策略自动运行（GitHub Actions）
+# 说明：
+#   - cron 为 UTC 时间：'0 16 * * 1-5' = UTC 16:00 = 北京时间次日 00:00（数据已收盘）。
+#     如需盘后更早运行，可改为 '0 8 * * 1-5'（UTC 08:00 = 北京 16:00）。
+#   - GitHub Actions 无持久化磁盘：data/（308MB 历史面板）每次 checkout 后为空，
+#     工作流通过 actions/cache 缓存减少重复抓取；若从未跑过，首次会执行全量数据抓取
+#     （fetch_all_v8.py 约 1-2 小时 + fetch_ohlc_v8.py 约 12 分钟，均在 6 小时限制内）。
+#   - 生产环境推荐云服务器 cron + git pull（见 README「云服务器部署」），可保留本地数据缓存，
+#     每日运行 < 5 分钟。
+name: Daily Strategy Run
+
+on:
+  schedule:
+    - cron: '0 16 * * 1-5'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  run-strategy:
+    runs-on: ubuntu-latest
+    env:
+      TZ: 'Asia/Shanghai'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 数据缓存：首次全量抓取后缓存 data/，后续运行直接命中（缓存键含日期，每日失效重建）
+      - name: Cache strategy data
+        uses: actions/cache@v4
+        id: data-cache
+        with:
+          path: data/
+          key: v81-data-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            v81-data-${{ runner.os }}-
+
+      - name: Fetch historical data (first run only)
+        if: steps.data-cache.outputs.cache-hit != 'true'
+        run: |
+          cd src
+          python fetch_all_v8.py || echo "fetch_all_v8 失败，检查网络/代理（沙箱外一般可用）"
+          python fetch_ohlc_v8.py || echo "fetch_ohlc_v8 失败，后续 next_open 口径不可用"
+
+      - name: Run signal generator (V8.1)
+        run: |
+          cd src
+          python signal_generator.py --live
+
+      - name: Run sim tracker
+        run: |
+          cd src
+          python sim_tracker.py
+
+      - name: Upload artifacts (signals & nav)
+        uses: actions/upload-artifact@v4
+        with:
+          name: strategy-outputs
+          path: |
+            output/signals/
+            output/sim_nav/

@@ -378,6 +378,7 @@ def main():
     print(f"[{datetime.now()}] 截面月末={last_me.date()}  分段={seg}  因子集={flabel}  "
           f"目标持仓={len(targets)}  市场目标仓位 regime_weight={tw_last:.2f}")
     # 审计字段：signal_date（信号日=截面月末收盘）/ execution_date（T+1 开盘执行）
+    close = panels["close"]
     nxt = close.index[close.index > last_me]
     exec_date = nxt[0].date() if len(nxt) else "(数据末日，待下交易日)"
     print(f"[{datetime.now()}] AUDIT signal_date={last_me.date()} | "

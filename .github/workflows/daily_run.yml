@@ -1,12 +1,17 @@
 # V8.1 每日策略自动运行（GitHub Actions）
-# 说明：
-#   - cron 为 UTC 时间：'0 16 * * 1-5' = UTC 16:00 = 北京时间次日 00:00（数据已收盘）。
-#     如需盘后更早运行，可改为 '0 8 * * 1-5'（UTC 08:00 = 北京 16:00）。
-#   - GitHub Actions 无持久化磁盘：data/（308MB 历史面板）每次 checkout 后为空，
-#     工作流通过 actions/cache 缓存减少重复抓取；若从未跑过，首次会执行全量数据抓取
-#     （fetch_all_v8.py 约 1-2 小时 + fetch_ohlc_v8.py 约 12 分钟，均在 6 小时限制内）。
-#   - 生产环境推荐云服务器 cron + git pull（见 README「云服务器部署」），可保留本地数据缓存，
-#     每日运行 < 5 分钟。
+#
+# 【关键修复 2026-08-20】数据外置说明：
+#   GitHub Actions 美国 runner 无法稳定访问 akshare 中国数据源
+#   （stock_info_a_code_name 等调用 ConnectionReset），原先「首次全量抓取」
+#   步骤必然失败并掩盖后续步骤（FileNotFoundError 级联崩溃）。
+#   现改为从独立 data 分支拉取预构建的核心面板（基准 2025-08-12）：
+#     v8_close_panel / v8_amount_panel / v6_index / roe_panel_v8 /
+#     gpm_yoy_panel_v8 / v3_ohlcv.pkl / v6_amount_panel / v8_universe.json /
+#     _v8_revsignal_cache.parquet
+#
+#   数据更新流程（本地）：更新面板后
+#     git add -f data/<文件> && git commit -m "update data" && git push origin data
+#   下次 Actions 运行即使用新数据。cron 为 UTC 时间，'0 16 * * 1-5' = 北京次日 00:00。
 name: Daily Strategy Run
 
 on:
@@ -33,22 +38,36 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      # 数据缓存：首次全量抓取后缓存 data/，后续运行直接命中（缓存键含日期，每日失效重建）
-      - name: Cache strategy data
-        uses: actions/cache@v4
-        id: data-cache
+      # 数据外置：从 data 分支拉取预构建面板（绕过 Actions 无法访问中国源的问题）
+      - name: Checkout prebuilt data (data branch)
+        uses: actions/checkout@v4
         with:
-          path: data/
-          key: v81-data-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: |
-            v81-data-${{ runner.os }}-
+          repository: Dane666/work
+          ref: data
+          path: _data_bundle
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fetch historical data (first run only)
-        if: steps.data-cache.outputs.cache-hit != 'true'
+      - name: Stage data into workspace
         run: |
-          cd src
-          python fetch_all_v8.py || echo "fetch_all_v8 失败，检查网络/代理（沙箱外一般可用）"
-          python fetch_ohlc_v8.py || echo "fetch_ohlc_v8 失败，后续 next_open 口径不可用"
+          mkdir -p data
+          cp -r _data_bundle/data/. data/
+          echo "=== 已载入数据文件 ==="
+          ls -la data/
+
+      # 数据完整性校验：缺失时给出明确指引，避免 FileNotFoundError 级联崩溃
+      - name: Verify data presence
+        run: |
+          missing=0
+          for f in v8_close_panel.parquet v8_amount_panel.parquet v6_index.parquet \
+                   roe_panel_v8.parquet gpm_yoy_panel_v8.parquet v3_ohlcv.pkl \
+                   v6_amount_panel.parquet v8_universe.json; do
+            if [ ! -f "data/$f" ]; then
+              echo "::error::缺失数据文件 data/$f —— 请本地更新面板后执行 git push origin data"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "数据完整性校验通过"
 
       - name: Run signal generator (V8.1)
         run: |

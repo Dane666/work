@@ -72,7 +72,10 @@ jobs:
       - name: Run signal generator (V8.1)
         run: |
           cd src
-          python signal_generator.py --live
+          # GitHub Actions 无法访问 akshare 中国源，故不加 --live
+          # （--live 会逐只股票请求实时行情并因超时卡死数小时）；
+          # 实时刷新请在本机/云服务器执行。Actions 直接用 data 分支面板生成信号。
+          python signal_generator.py
 
       - name: Run sim tracker
         run: |

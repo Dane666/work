@@ -134,6 +134,20 @@ def load_panels(as_of: pd.Timestamp, live: bool = False) -> dict:
     gpm = pd.read_parquet(P["gpm"]).reindex(close.index).ffill()
     ohlcv_old = P["ohlcv_old"]
     codes = list(close.columns)
+    div_yield = None
+
+    # 主板版 V3：收窄池（V8 指数成分 ∩ 主板 60/00）+ 股息率面板
+    if getattr(config, "USE_MAINBOARD", False):
+        from fetch_dividend import get_v2_codes
+        codes = get_v2_codes()
+        close = close.reindex(columns=codes)
+        amount = amount.reindex(columns=codes)
+        roe = roe.reindex(columns=codes)
+        gpm = gpm.reindex(columns=codes)
+        dy_p = config.DATA_DIR / "div_yield_panel_mainboard.parquet"
+        if dy_p.exists():
+            div_yield = pd.read_parquet(dy_p).reindex(columns=codes)
+        print(f"  [V3] 主板收窄池 {len(codes)} 只，股息率面板 {'已加载' if div_yield is not None else '缺失'}")
 
     if live:
         try:
@@ -144,7 +158,7 @@ def load_panels(as_of: pd.Timestamp, live: bool = False) -> dict:
 
     return dict(close=close, amount=amount, idx=idx, roe=roe, gpm=gpm,
                 ohlcv_old=ohlcv_old, codes=codes, panel_label=P["label"],
-                rev_cache=P["rev_cache"],
+                rev_cache=P["rev_cache"], div_yield=div_yield,
                 data_start=str(close.index[0].date()),
                 data_end=str(close.index[-1].date()))
 
@@ -226,7 +240,12 @@ def compute_v81_targets(panels: dict, as_of: pd.Timestamp) -> dict:
     返回 dict：
       last_me, targets({code: weight}), segment("v8"|"combo"), tw_last,
       factor_label, me, tw_daily, switch_log, sel_v8, sel_trend, sel_brk
+
+    USE_MAINBOARD=True 时走主板版 V3 链路（质量过滤 + 长动量 + 股息率门控，
+    见 _compute_v81_mb_targets）。
     """
+    if getattr(config, "USE_MAINBOARD", False):
+        return _compute_v81_mb_targets(panels, as_of)
     close = panels["close"]; amount = panels["amount"]; idx = panels["idx"]
     roe = panels["roe"]; gpm = panels["gpm"]; ohlcv_old = panels["ohlcv_old"]
     codes = panels["codes"]
@@ -284,6 +303,70 @@ def compute_v81_targets(panels: dict, as_of: pd.Timestamp) -> dict:
                 sel_v8=sel_v8, sel_trend=sel_trend, sel_brk=sel_brk,
                 slip_map=None, tier_counts=None,
                 rolling_ic=rolling_ic, use_reversal=use_reversal)
+
+
+def _compute_v81_mb_targets(panels: dict, as_of: pd.Timestamp) -> dict:
+    """主板版 V3 链路（2026-08-25 回测达标：全期 0.54 / 2024-25 0.65 / 回撤 -19.4%）：
+      收窄池（load_panels 已筛 1004 只）→ 质量过滤 → 长动量质量选股（强制质量模式）
+      → MA240+波动率门控 × 股息率门控 → 分区间（≤2023 V8 / ≥2024 E 组合）。"""
+    from v3_common import build_dy_gate, apply_quality_mask, build_mz_v3
+    close = panels["close"]; amount = panels["amount"]; idx = panels["idx"]
+    roe = panels["roe"]; gpm = panels["gpm"]; codes = panels["codes"]
+    dy = panels.get("div_yield")
+
+    close_m = mask_new_listings(close, config.NEW_STOCK_MIN_DAYS)
+    me = month_ends_in(close_m, config.START_DATE,
+                       min(as_of, pd.Timestamp(panels["data_end"])))
+    close_m = apply_quality_mask(close_m, roe, amount, me)     # V3-2 质量过滤
+    rsi = compute_rsi(close_m, config.RSI_WINDOW)
+    mz = build_mz_v3(close_m, roe, gpm, me, long_momentum=True)  # V3-3 长动量
+    use_reversal = pd.Series(False, index=me)                    # V3-4 强制质量
+    empty_rev = pd.DataFrame(index=close_m.index, columns=close_m.columns)
+    sel_v8, switch_log = build_selection_v5(close_m, rsi, empty_rev, mz, me,
+                                            use_reversal, POOL_PCT, N_SELECT)
+    sel_trend = sig_trend(close_m, me, top_n=N_SELECT)
+    sel_brk = sig_breakout(close_m, amount, me, top_n=N_SELECT)
+
+    tw_daily, vol_regime = build_ma240_vol_target_weight(
+        idx, close_m.index, MA_BASE, month_ends=me,
+        vol_q=VOL_Q, reduced_weight=REDUCED_WEIGHT, vol_lookback=VOL_LOOKBACK)
+    if dy is not None:
+        gate = build_dy_gate(dy, me)                            # V3-1 股息率门控
+        gate_daily = gate.reindex(close_m.index).ffill().fillna(1.0)
+        tw_daily = tw_daily * gate_daily
+        print(f"  [V3] 股息率门控已叠加（触发月={int((gate < 1).sum())}/{len(gate)}）")
+
+    last_me = me[-1]
+    tw_last = float(tw_daily.get(last_me, 1.0))
+
+    if last_me < SPLIT_DATE:
+        segment = "v8"
+        codes_s = sel_v8.get(last_me, [])
+        targets = {c: FIXED_WEIGHT for c in codes_s}
+        factor_label = "mb_v3_quality"
+    else:
+        segment = "combo"
+        acc: dict = {}
+        combos = [("V8", sel_v8), ("Trend", sel_trend), ("Breakout", sel_brk)]
+        for name, sel_s in combos:
+            codes_s = sel_s.get(last_me, [])
+            if not codes_s:
+                print(f"  [combo] {name} 空仓（{last_me.date()}）")
+                continue
+            w_each = 1.0 / N_COMBO / len(codes_s)
+            for c in codes_s:
+                acc[c] = min(acc.get(c, 0.0) + w_each, COMBO_CAP)
+        targets = acc
+        factor_label = "mb_v3_combo(V8+Trend+Breakout)"
+
+    print(f"  [V3] 截面={last_me.date()} 分段={segment} 目标持仓={len(targets)} "
+          f"regime_weight={tw_last:.2f}")
+    return dict(last_me=last_me, targets=targets, segment=segment, tw_last=tw_last,
+                factor_label=factor_label, me=me, tw_daily=tw_daily,
+                switch_log=switch_log, vol_regime=vol_regime,
+                sel_v8=sel_v8, sel_trend=sel_trend, sel_brk=sel_brk,
+                slip_map=None, tier_counts=None,
+                rolling_ic=None, use_reversal=use_reversal)
 
 
 # ---------------------------------------------------------------------------

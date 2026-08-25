@@ -36,9 +36,10 @@ SIM_START_DATE = "2026-01-01"                             # 或 None
 # ----------------------------------------------------------------------------
 # 主板版数据面板（60/00 开头选股池，fetch_mainboard.py 产出）
 # ----------------------------------------------------------------------------
-# USE_MAINBOARD = True 时，signal_generator 切换至主板面板（回测通过后启用）。
+# USE_MAINBOARD = True 时，signal_generator 切换至主板版 V3 链路
+# （收窄池 1004 只 + 质量过滤 + 长动量 + 股息率门控，回测 0.54/0.65/-19.4% 达标，2026-08-25）。
 # 路径仅主板版使用；V8 面板（v8_close_panel 等）保持不变。
-USE_MAINBOARD = False
+USE_MAINBOARD = True
 MB_CLOSE = DATA_DIR / "mainboard_close_panel.parquet"
 MB_AMOUNT = DATA_DIR / "mainboard_amount_panel.parquet"
 MB_ROE = DATA_DIR / "roe_panel_mainboard.parquet"

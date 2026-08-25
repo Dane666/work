@@ -7,7 +7,7 @@
 #   现改为从独立 data 分支拉取预构建的核心面板（基准 2025-08-12）：
 #     v8_close_panel / v8_amount_panel / v6_index / roe_panel_v8 /
 #     gpm_yoy_panel_v8 / v3_ohlcv.pkl / v6_amount_panel / v8_universe.json /
-#     _v8_revsignal_cache.parquet
+#     v8_ohlcv.pkl（V8.1 dashboard 蜡烛图 K 线）/ _v8_revsignal_cache.parquet
 #
 #   数据更新流程（本地）：更新面板后
 #     git add -f data/<文件> && git commit -m "update data" && git push origin data
@@ -22,6 +22,14 @@ on:
 jobs:
   run-strategy:
     runs-on: ubuntu-latest
+    # V8.1 dashboard：contents 写入 docs、pages/id-token 用于 GitHub Pages 部署
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    concurrency:
+      group: strategy-deploy
+      cancel-in-progress: false
     env:
       TZ: 'Asia/Shanghai'
     steps:
@@ -60,7 +68,8 @@ jobs:
           missing=0
           for f in v8_close_panel.parquet v8_amount_panel.parquet v6_index.parquet \
                    roe_panel_v8.parquet gpm_yoy_panel_v8.parquet v3_ohlcv.pkl \
-                   v6_amount_panel.parquet v8_universe.json; do
+                   v6_amount_panel.parquet v8_universe.json \
+                   v8_ohlcv.pkl; do
             if [ ! -f "data/$f" ]; then
               echo "::error::缺失数据文件 data/$f —— 请本地更新面板后执行 git push origin data"
               missing=1
@@ -81,6 +90,44 @@ jobs:
         run: |
           cd src
           python sim_tracker.py
+
+      # V8.1 dashboard：持仓走势图 + GitHub Pages 部署
+      # Actions 上跑默认 offline（仅用 data 分支面板，无中国源拉取不了 akshare），
+      # 本地/云服务器用 `python generate_dashboard.py --live` 可叠加最新行情。
+      - name: Install CJK fonts (for matplotlib 中文渲染)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fonts-noto-cjk fonts-noto-cjk-extra >/dev/null 2>&1 \
+            || echo "::warning::CJK font install failed，图表中文可能显示为方块"
+
+      - name: Generate dashboard (charts + HTML)
+        run: |
+          cd src
+          python generate_dashboard.py
+
+      - name: Commit & push docs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs
+          if git diff --cached --quiet; then
+            echo "docs 无变化，跳过提交"
+          else
+            git commit -m "chore(docs): update V8.1 strategy dashboard [skip ci]"
+            git push
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifacts (signals & nav)
         uses: actions/upload-artifact@v4

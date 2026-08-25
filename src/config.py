@@ -14,6 +14,13 @@ DATA_DIR = BASE_DIR / "data"                               # 原始数据缓存�
 DAILY_DIR = DATA_DIR / "daily"                            # 个股日线缓存（按代码分文件）
 FIN_DIR = DATA_DIR / "fin"                                # 个股财报缓存（按代码分文件）
 OUTPUT_DIR = BASE_DIR / "output"                          # 报告与中间产物输出目录
+DOCS_DIR = BASE_DIR / "docs"                              # GitHub Pages 部署目录（dashboard）
+
+# ----------------------------------------------------------------------------
+# V8.1 Dashboard（持仓走势图）数据源
+# ----------------------------------------------------------------------------
+V8_OHLCV = DATA_DIR / "v8_ohlcv.pkl"                      # 完整 OHLC（fetch_ohlc_v8.py 最终产物）
+V8_OHLCV_CKPT = DATA_DIR / "_v8_ohlcv_ckpt.pkl"           # OHLC 抓取检查点（前者缺失时回退）
 
 # ----------------------------------------------------------------------------
 # 回测时间范围与样本划分

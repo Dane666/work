@@ -40,11 +40,13 @@ def send_bark(title: str, content: str, device_key: str = None, icon: str = None
     try:
         r = requests.post(BARK_URL, json=payload, timeout=10)
         if r.status_code == 200:
-            logger.info("Bark sent")
-        else:
-            logger.error(f"Bark failed: {r.text}")
+            logger.info("Bark sent (HTTP 200)")
+            return True
+        logger.error(f"Bark failed (HTTP {r.status_code}): {r.text}")
+        return False
     except Exception as e:
         logger.error(f"Bark error: {e}")
+        return False
 
 
 def send_msg(title: str, content: str):

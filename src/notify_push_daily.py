@@ -10,6 +10,7 @@ BARK_DEVICE_KEY 通过环境变量注入（GitHub Actions secrets）；未配置
 import os
 import sys
 import glob
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,9 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import OUTPUT_DIR
 from notify.bark import send_bark
+
+# 让 bark.py 内的 logger 输出到控制台（Actions 日志可见真实 HTTP 状态）
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 
 def latest_signal_csv():
@@ -94,8 +98,11 @@ def main():
     if not key:
         print("\n⚠️ 未配置 BARK_DEVICE_KEY，仅本地预览，未推送。")
         return
-    send_bark(title, body, device_key=key)
-    print("\n✅ Bark 推送完成")
+    ok = send_bark(title, body, device_key=key)
+    if ok:
+        print("\n✅ Bark 推送成功（HTTP 200），手机应已收到。")
+    else:
+        print("\n❌ Bark 推送失败，请检查 BARK_DEVICE_KEY 是否正确 / Actions 网络。")
 
 
 if __name__ == "__main__":

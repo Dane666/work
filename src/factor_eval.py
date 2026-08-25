@@ -78,13 +78,24 @@ def compute_rolling_regime(monthly_ic: pd.Series,
 def compute_momentum_zscore(close_panel: pd.DataFrame,
                             roe_panel: pd.DataFrame,
                             gpm_yoy_panel: pd.DataFrame,
-                            month_ends) -> pd.DataFrame:
+                            month_ends,
+                            div_yield_panel: pd.DataFrame = None) -> pd.DataFrame:
     """在每月末计算 ret_12 + roe + gpm_yoy 的等权 Z-score 合成分（date x code）。
 
     仅依赖截至决策日已可得数据；截面标准化后等权求和。返回月频面板（行=month_end）。
+
+    div_yield_panel : 可选，月频股息率面板（date × code，%，无分红=0）。
+      提供时作为「第 4 个等权因子」并入（ret_12+roe+gpm_yoy+dividend_yield）/4；
+      为 None 时保持 V8 三因子等权行为（向后兼容，V8.1 调用不受影响）。
     """
     ret12 = close_panel.pct_change(config.FWD_RETURN_DAYS * 12)  # ≈12 个月动量
     panels = {"ret_12": ret12, "roe": roe_panel, "gpm_yoy": gpm_yoy_panel}
+    dy_use = None
+    if div_yield_panel is not None:
+        # 交易月末与日历月末可能差一天：reindex 缺失月份填 0（无分红=0），
+        # 避免 NaN 行导致 dropna 整月空仓（曾致每年 4 空月）
+        dy_use = div_yield_panel.reindex(
+            pd.DatetimeIndex(month_ends), fill_value=0.0).sort_index()
 
     # ---- V9 模块1：分析师评级因子（point-in-time，零未来函数）----
     # 仅作「补充」并入质量评分，绝不替换原有 ret_12/roe/gpm_yoy 逻辑。
@@ -104,7 +115,9 @@ def compute_momentum_zscore(close_panel: pd.DataFrame,
             "roe": roe_panel.loc[t],
             "gpm_yoy": gpm_yoy_panel.loc[t],
         })
-        sub = sub.dropna()  # 三因子均有效才参与（避免单因子缺失导致偏置）
+        if dy_use is not None and t in dy_use.index:
+            sub["dividend_yield"] = dy_use.loc[t]
+        sub = sub.dropna()  # 三因子（或四因子）均有效才参与（避免单因子缺失导致偏置）
         if sub.empty:
             rows[t] = pd.Series(dtype=float)
             continue
@@ -115,15 +128,14 @@ def compute_momentum_zscore(close_panel: pd.DataFrame,
             lo, hi = sub_w[col].quantile(0.01), sub_w[col].quantile(0.99)
             sub_w[col] = sub_w[col].clip(lo, hi)
         z = (sub_w - sub_w.mean()) / sub_w.std(ddof=0)
-        # 补充分析师因子：作为「第4个等权因子」并入，绝不替换原 ret_12/roe/gpm_yoy。
-        # 用 /4 而非直接相加，保持合成分尺度与 V8 可比（若直接加满 Z，分析师因子
-        # 会占 60%+ 权重，等同于替换原逻辑，违背"补充"约束）。
+        n_f = sub_w.shape[1]                          # 参与因子数（3 或 4）
+        # 补充分析师因子：作为「额外」因子并入（/（n_f+1）），绝不替换原逻辑。
         # 无分析师覆盖的股票 z_ana=0（中性），不改变其入选资格，只是不获得加分。
         if ana_comp is not None and t in ana_comp.index:
             z_ana = ana_comp.loc[t].reindex(sub_w.index).fillna(0.0)
-            comp = (z["ret_12"] + z["roe"] + z["gpm_yoy"] + z_ana) / 4.0
+            comp = (z.sum(axis=1) + z_ana) / (n_f + 1.0)
         else:
-            comp = (z["ret_12"] + z["roe"] + z["gpm_yoy"]) / 3.0  # 等权
+            comp = z.sum(axis=1) / n_f              # 等权
         rows[t] = comp
     return pd.DataFrame(rows).T.sort_index()  # 行=month_end, 列=code
 

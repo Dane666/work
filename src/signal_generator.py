@@ -82,6 +82,26 @@ NAMES_CACHE = config.DATA_DIR / "stock_names.json"
 
 
 # ---------------------------------------------------------------------------
+# 面板路径：USE_MAINBOARD=True 时切主板版（60/00 开头选股池）
+# ---------------------------------------------------------------------------
+def _panel_paths():
+    if getattr(config, "USE_MAINBOARD", False):
+        rev_cache = config.DATA_DIR / "_mainboard_revsignal_cache.parquet"
+        return dict(close=config.MB_CLOSE, amount=config.MB_AMOUNT,
+                    roe=config.MB_ROE, gpm=config.MB_GPM,
+                    ohlcv_old={}, rev_cache=rev_cache,
+                    label="主板版(60/00)")
+    return dict(close=config.DATA_DIR / "v8_close_panel.parquet",
+                amount=config.DATA_DIR / "v8_amount_panel.parquet",
+                roe=config.DATA_DIR / "roe_panel_v8.parquet",
+                gpm=config.DATA_DIR / "gpm_yoy_panel_v8.parquet",
+                ohlcv_old=(pd.read_pickle(config.V3_OHLCV)
+                           if config.V3_OHLCV.exists() else {}),
+                rev_cache=REVERSAL_SIGNAL_CACHE,
+                label="V8(中证500+创业板+中证1000)")
+
+
+# ---------------------------------------------------------------------------
 # 工具函数（与 main_v8_1_split.py 完全一致）
 # ---------------------------------------------------------------------------
 def mask_new_listings(close_panel: pd.DataFrame, min_days: int = 60) -> pd.DataFrame:
@@ -103,15 +123,16 @@ def month_ends_in(close_panel: pd.DataFrame, start, end) -> pd.DatetimeIndex:
 
 
 def load_panels(as_of: pd.Timestamp, live: bool = False) -> dict:
-    """装载 V8 面板（本地 parquet）。--live 时尝试追加最新行情（失败回退本地）。"""
-    close = pd.read_parquet(config.DATA_DIR / "v8_close_panel.parquet")
-    amount = pd.read_parquet(config.DATA_DIR / "v8_amount_panel.parquet")
+    """装载面板（V8 或主板版，由 config.USE_MAINBOARD 决定）。--live 时尝试追加最新行情（失败回退本地）。"""
+    P = _panel_paths()
+    close = pd.read_parquet(P["close"])
+    amount = pd.read_parquet(P["amount"])
     idx = pd.read_parquet(config.DATA_DIR / "v6_index.parquet")
     if isinstance(idx, pd.DataFrame):
         idx = idx.iloc[:, 0]
-    roe = pd.read_parquet(config.DATA_DIR / "roe_panel_v8.parquet").reindex(close.index).ffill()
-    gpm = pd.read_parquet(config.DATA_DIR / "gpm_yoy_panel_v8.parquet").reindex(close.index).ffill()
-    ohlcv_old = pd.read_pickle(config.V3_OHLCV) if config.V3_OHLCV.exists() else {}
+    roe = pd.read_parquet(P["roe"]).reindex(close.index).ffill()
+    gpm = pd.read_parquet(P["gpm"]).reindex(close.index).ffill()
+    ohlcv_old = P["ohlcv_old"]
     codes = list(close.columns)
 
     if live:
@@ -122,7 +143,8 @@ def load_panels(as_of: pd.Timestamp, live: bool = False) -> dict:
             print(f"[{datetime.now()}] --live：行情刷新失败，回退本地数据（{e}）")
 
     return dict(close=close, amount=amount, idx=idx, roe=roe, gpm=gpm,
-                ohlcv_old=ohlcv_old, codes=codes,
+                ohlcv_old=ohlcv_old, codes=codes, panel_label=P["label"],
+                rev_cache=P["rev_cache"],
                 data_start=str(close.index[0].date()),
                 data_end=str(close.index[-1].date()))
 
@@ -176,11 +198,12 @@ def _refresh_latest(close, amount, idx, codes, as_of):
     return close, amount, idx
 
 
-def _get_reversal_signal(close_m, ohlcv_full):
-    """构建/加载滚动反转信号面板（V8 宇宙专用缓存，与 V7 缓存隔离）。"""
-    if REVERSAL_SIGNAL_CACHE.exists():
+def _get_reversal_signal(close_m, ohlcv_full, cache_path=None):
+    """构建/加载滚动反转信号面板（V8/主板版缓存隔离）。"""
+    cache_path = cache_path or REVERSAL_SIGNAL_CACHE
+    if cache_path.exists():
         try:
-            cached = pd.read_parquet(REVERSAL_SIGNAL_CACHE)
+            cached = pd.read_parquet(cache_path)
             if (cached.index.equals(close_m.index) and
                     list(cached.columns) == list(close_m.columns)):
                 return cached
@@ -188,7 +211,7 @@ def _get_reversal_signal(close_m, ohlcv_full):
             pass
     sig = build_rolling_reversal_signal(close_m, ohlcv_full, window=ROLL_WINDOW)
     try:
-        sig.to_parquet(REVERSAL_SIGNAL_CACHE)
+        sig.to_parquet(cache_path)
     except Exception:
         pass
     return sig
@@ -214,7 +237,8 @@ def compute_v81_targets(panels: dict, as_of: pd.Timestamp) -> dict:
                        min(as_of, pd.Timestamp(panels["data_end"])))
 
     ohlcv_full = build_ohlcv_full(close, amount, ohlcv_old, codes)
-    reversal_signal = _get_reversal_signal(close_m, ohlcv_full)
+    reversal_signal = _get_reversal_signal(close_m, ohlcv_full,
+                                           cache_path=panels["rev_cache"])
 
     monthly_ic = monthly_reversal_ic(close_m, rsi, me, config.FWD_RETURN_DAYS)
     rolling_ic, use_reversal = compute_rolling_regime(monthly_ic, 12, IC_BASE, 6)
@@ -354,8 +378,11 @@ def main():
     ap.add_argument("--no-cache", action="store_true", help="禁用反转信号缓存，强制重算")
     args = ap.parse_args()
 
-    if args.no_cache and REVERSAL_SIGNAL_CACHE.exists():
-        REVERSAL_SIGNAL_CACHE.unlink()
+    if args.no_cache:
+        for p in [REVERSAL_SIGNAL_CACHE,
+                  config.DATA_DIR / "_mainboard_revsignal_cache.parquet"]:
+            if p.exists():
+                p.unlink()
 
     as_of = (pd.Timestamp(args.date) if args.date
              else pd.Timestamp(datetime.now().strftime("%Y-%m-%d")))
@@ -366,8 +393,8 @@ def main():
     print(f"[{datetime.now()}] 信号基准日 as_of={as_of.date()}  live={args.live}")
 
     panels = load_panels(as_of, live=args.live)
-    print(f"[{datetime.now()}] 数据区间 {panels['data_start']} ~ {panels['data_end']}  "
-          f"共 {len(panels['codes'])} 只")
+    print(f"[{datetime.now()}] 选股池: {panels['panel_label']}  数据区间 "
+          f"{panels['data_start']} ~ {panels['data_end']}  共 {len(panels['codes'])} 只")
 
     res = compute_v81_targets(panels, as_of)
     last_me = res["last_me"]

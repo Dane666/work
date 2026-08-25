@@ -34,6 +34,19 @@ V8_OHLCV_CKPT = DATA_DIR / "_v8_ohlcv_ckpt.pkl"           # OHLC 抓取检查点
 SIM_START_DATE = "2026-01-01"                             # 或 None
 
 # ----------------------------------------------------------------------------
+# 主板版数据面板（60/00 开头选股池，fetch_mainboard.py 产出）
+# ----------------------------------------------------------------------------
+# USE_MAINBOARD = True 时，signal_generator 切换至主板面板（回测通过后启用）。
+# 路径仅主板版使用；V8 面板（v8_close_panel 等）保持不变。
+USE_MAINBOARD = False
+MB_CLOSE = DATA_DIR / "mainboard_close_panel.parquet"
+MB_AMOUNT = DATA_DIR / "mainboard_amount_panel.parquet"
+MB_ROE = DATA_DIR / "roe_panel_mainboard.parquet"
+MB_GPM = DATA_DIR / "gpm_yoy_panel_mainboard.parquet"
+MB_OHLCV = DATA_DIR / "mainboard_ohlcv.pkl"
+MB_UNIVERSE_JSON = DATA_DIR / "mainboard_universe.json"
+
+# ----------------------------------------------------------------------------
 # 回测时间范围与样本划分
 # ----------------------------------------------------------------------------
 START_DATE = "20180101"          # 全样本起点

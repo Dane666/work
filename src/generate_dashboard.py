@@ -121,7 +121,9 @@ def T(zh: str, en: str = "") -> str:
 # 数据加载
 # ---------------------------------------------------------------------------
 def find_ohlcv_path() -> Path | None:
-    """定位 K 线 pkl：优先 v8_ohlcv.pkl，回退 _v8_ohlcv_ckpt.pkl。"""
+    """定位 K 线 pkl：主板版优先 mainboard_ohlcv.pkl；否则 v8_ohlcv.pkl 回退 _v8_ohlcv_ckpt.pkl。"""
+    if getattr(config, "USE_MAINBOARD", False) and config.MB_OHLCV.exists():
+        return config.MB_OHLCV
     for p in [config.V8_OHLCV, config.V8_OHLCV_CKPT]:
         if p.exists():
             return p

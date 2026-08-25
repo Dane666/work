@@ -9,3 +9,5 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 # parquet 读写必需（v8_close_panel / v8_ohlcv.pkl 之外的全部面板均以 parquet 落盘）
 pyarrow>=14.0.0
+# Bark 推送每日结果至手机（参考 Momentum/notify）
+requests>=2.28.0

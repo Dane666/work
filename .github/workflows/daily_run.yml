@@ -89,3 +89,13 @@ jobs:
           path: |
             output/signals/
             output/sim_nav/
+
+      # 每日结果 Bark 推送至手机（参考 Momentum/notify/bark.py）。
+      # 仅在仓库配置了 BARK_DEVICE_KEY secret 时执行；未配置则跳过（不影响主流程）。
+      - name: Bark push (每日结果)
+        if: ${{ secrets.BARK_DEVICE_KEY != '' }}
+        env:
+          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
+        run: |
+          cd src
+          python notify_push_daily.py

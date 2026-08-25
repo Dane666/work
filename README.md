@@ -86,6 +86,13 @@ bash scripts/run_daily.sh
    - **产出**：信号与净值作为 artifact 上传（Actions 页面可下载）。
    - 手动触发：Actions 页 → Run workflow。
 
+3. **Bark 手机推送（可选）**：每日跑出的信号与模拟盘净值会自动推送至手机（参考 Momentum/notify）。
+   - 在仓库 **Settings → Secrets and variables → Actions** 新增仓库密钥 `BARK_DEVICE_KEY`，
+     值为你的 Bark 设备 Key（或完整推送 URL，如 `https://api.day.app/<你的key>`，脚本会自动提取末尾 key）。
+   - 配置后工作流末尾的 `Bark push (每日结果)` 步骤自动执行；未配置则跳过、不影响主流程。
+   - 推送内容：信号截面日期、BUY/SELL/HOLD 指令数、模拟盘 NAV/累计收益/超额、Top15 买入清单。
+   - 本地预览（不推送）：`cd src && python notify_push_daily.py`。
+
 > ⚠️ 局限：GitHub Actions 每次运行都要重放数据（缓存策略受 7 天限制），且需联网抓取。
 > **生产环境建议用云服务器方案（下节）**，可本地持久化数据、每日运行 < 5 分钟。
 

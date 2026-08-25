@@ -375,6 +375,14 @@ def main():
     tw_last = res["tw_last"]
     seg = res["segment"]
     flabel = res["factor_label"]
+
+    # ---- 模拟盘起始日期门控：起始日之前不输出任何信号 ----
+    start = getattr(config, "SIM_START_DATE", None)
+    if start is not None and pd.Timestamp(last_me).normalize() < pd.Timestamp(start).normalize():
+        print(f"[{datetime.now()}] ⛔ 截面月末 {last_me.date()} < SIM_START_DATE={start}，"
+              f"起始日之前不输出信号（模拟盘纯净起点，等待 ≥ {start} 的截面）")
+        return None
+
     print(f"[{datetime.now()}] 截面月末={last_me.date()}  分段={seg}  因子集={flabel}  "
           f"目标持仓={len(targets)}  市场目标仓位 regime_weight={tw_last:.2f}")
     # 审计字段：signal_date（信号日=截面月末收盘）/ execution_date（T+1 开盘执行）

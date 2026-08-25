@@ -121,11 +121,111 @@ def fetch_day_prices(codes, date: pd.Timestamp) -> dict:
 # 状态读写
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    if not STATE_FILE.exists():
+        return _empty_state()
+    st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    _apply_start_date(st)
+    return st
+
+
+def _empty_state() -> dict:
     return {"init_date": None, "cash": 1.0, "positions": {},
             "nav": 1.0, "pending_buys": [], "pending_sells": [],
             "last_nav_date": None}
+
+
+def _apply_start_date(st: dict) -> None:
+    """SIM_START_DATE 模式：清理起始日之前建仓的持仓，必要时完全重置。
+
+    约定（V8.1 起始日期功能）：
+      - position 缺失 entry_date（旧数据结构）→ 视为起始日之前建仓，清理
+      - entry_date < SIM_START_DATE → 清理
+      - 无保留持仓 → 完全重置（NAV=1.0 / 现金 100% / 空仓 / nav_history 清空）
+      - 部分保留 → 被清旧仓按成本变现进 cash（起始日之前的历史盈亏忽略），nav_history 截断
+    """
+    start = getattr(config, "SIM_START_DATE", None)
+    if start is None:
+        return
+    start_ts = pd.Timestamp(start).normalize()
+    positions = dict(st.get("positions", {}))
+    kept, dropped = {}, []
+    for c, h in positions.items():
+        ed = h.get("entry_date")
+        ok = ed is not None and pd.Timestamp(ed).normalize() >= start_ts
+        if ok:
+            kept[c] = h
+        else:
+            dropped.append(c)
+    if dropped:
+        print(f"[sim_tracker] SIM_START_DATE={start}：清理起始日之前建仓 {len(dropped)} 只"
+              f"（{', '.join(dropped[:8])}{' ...' if len(dropped) > 8 else ''}）")
+
+    if not kept:
+        if positions:
+            print("[sim_tracker] 无起始日之后的有效持仓 → 模拟盘重置：NAV=1.0 / 现金 100% / 空仓")
+            st.update(_empty_state())
+            st["init_date"] = str(start_ts.date())
+            _reset_nav_history()
+        elif st.get("init_date") != str(start_ts.date()):
+            st["init_date"] = str(start_ts.date())
+            _truncate_nav_history(start_ts)
+    else:
+        st["positions"] = kept
+        for c in dropped:
+            h = positions[c]
+            st["cash"] = float(st.get("cash", 0.0)) + float(h["shares"]) * float(h["cost"])
+        _truncate_nav_history(start_ts)
+
+
+def _truncate_nav_history(start_ts) -> None:
+    """删除 sim_nav_history.csv 中早于 start_ts 的记录（保留其余）。"""
+    p = NAV_DIR / "sim_nav_history.csv"
+    if not p.exists():
+        return
+    df = pd.read_csv(p)
+    df["date"] = pd.to_datetime(df["date"])
+    df_new = df[df["date"] >= start_ts]
+    if len(df_new) != len(df):
+        df_new.to_csv(p, index=False, encoding="utf-8")
+        print(f"[sim_tracker] 清理 nav_history 中早于 {start_ts.date()} 的记录"
+              f"（移除 {len(df) - len(df_new)} 条）")
+
+
+def _reset_nav_history() -> None:
+    """完全重置：清空净值历史（从起始日起重建）。"""
+    p = NAV_DIR / "sim_nav_history.csv"
+    if p.exists():
+        p.unlink()
+        print("[sim_tracker] nav_history 已清空（模拟盘从起始日重建净值曲线）")
+
+
+def _ensure_start_nav(as_of: pd.Timestamp, state: dict) -> None:
+    """起始日模式：若净值历史尚无 ≥ SIM_START_DATE 的记录，则补记一条空仓起点 NAV。"""
+    start = getattr(config, "SIM_START_DATE", None)
+    if start is None:
+        return
+    start_ts = pd.Timestamp(start).normalize()
+    if pd.Timestamp(as_of).normalize() < start_ts:
+        return
+    hist = _read_nav()
+    if len(hist) and pd.to_datetime(hist["date"]).max() >= start_ts:
+        return
+    bench = load_benchmark(state.get("init_date") or as_of)
+    b_nav = float(bench.get(as_of, bench.iloc[-1])) if as_of in bench.index else 1.0
+    nav = float(state.get("nav", 1.0))
+    row = {
+        "date": as_of.strftime("%Y-%m-%d"),
+        "nav": round(nav, 6),
+        "cash": round(float(state.get("cash", 1.0)), 6),
+        "position_value": 0.0,
+        "benchmark_nav": round(float(b_nav), 6),
+        "daily_return": 0.0,
+        "cum_return": round(nav - 1.0, 6),
+        "tracking_error": float("nan"),
+        "note": "start(模拟盘起点，空仓)",
+    }
+    _append_nav(row)
+    print(f"[sim_tracker] 记录模拟盘起点 NAV：{as_of.date()} NAV={row['nav']:.4f}（空仓，待起始日之后信号建仓）")
 
 
 def save_state(st):
@@ -149,6 +249,11 @@ def load_benchmark(base_date=None) -> pd.Series:
     idx = idx.dropna()
     if base_date is not None:
         bd = min(pd.Timestamp(base_date), idx.index[-1])
+        # 休市日容错：bd 不在交易日（如 SIM_START_DATE=2026-01-01 元旦）时
+        # 取 <= bd 的最近交易日定基，避免 KeyError
+        if bd not in idx.index:
+            prior = idx.index[idx.index <= bd]
+            bd = prior[-1] if len(prior) else idx.index[0]
         base_val = idx.loc[bd]
     else:
         base_val = idx.iloc[0]
@@ -201,7 +306,8 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
         if alloc <= 1e-9 or buy_price <= 0:
             continue
         shares = alloc / buy_price
-        positions[c] = {"shares": shares, "cost": buy_price}
+        positions[c] = {"shares": shares, "cost": buy_price,
+                        "entry_date": str(date.date())}   # 起始日期功能：记录建仓日
         cash -= alloc
         deployed += alloc
 
@@ -246,11 +352,17 @@ def main():
     as_of = (pd.Timestamp(args.date) if args.date
              else pd.Timestamp(datetime.now().strftime("%Y-%m-%d")))
 
+    # 状态加载提前：SIM_START_DATE 模式会在此清理旧持仓/重置（与信号文件无关）
+    state = load_state()
+    if args.init and state["init_date"] is None:
+        state["init_date"] = str(as_of.date())
+
     # 定位信号文件
     sig_files = sorted(f for f in os.listdir(SIGNAL_DIR)
                        if f.endswith("_signal.csv")) if os.path.isdir(SIGNAL_DIR) else []
     if not sig_files:
         print(f"[{datetime.now()}] 无信号文件，请先运行 signal_generator.py")
+        _ensure_start_nav(as_of, state)     # 起始日模式：补记空仓起点 NAV
         return
     if args.signal_date:
         sig_name = f"{args.signal_date}_signal.csv"
@@ -259,16 +371,22 @@ def main():
         cand = [f for f in sig_files
                 if pd.Timestamp(f.replace("_signal.csv", "")) <= as_of]
         sig_name = cand[-1] if cand else sig_files[-1]
+
+    # ---- 起始日期门控：早于 SIM_START_DATE 的信号不消费 ----
+    start = getattr(config, "SIM_START_DATE", None)
+    sig_date = pd.Timestamp(sig_name.replace("_signal.csv", ""))
+    if start is not None and sig_date < pd.Timestamp(start).normalize():
+        print(f"[{datetime.now()}] 信号 {sig_name} 早于 SIM_START_DATE={start}，忽略"
+              f"（模拟盘起始日之前不消费任何信号）")
+        _ensure_start_nav(as_of, state)
+        return
+
     sig_df = pd.read_csv(SIGNAL_DIR / sig_name, dtype={"code": str})
     print(f"[{datetime.now()}] 读取信号: {sig_name}（执行日={as_of.date()}）")
 
     # 滑点分级（与 V7.1 一致，仅成本模型，非信号）
     amount = pd.read_parquet(config.DATA_DIR / "v6_amount_panel.parquet")
     slip_map, _ = build_slippage_map(amount)
-
-    state = load_state()
-    if args.init and state["init_date"] is None:
-        state["init_date"] = str(as_of.date())
 
     # 试图获取执行日价格
     codes_all = list(sig_df["code"].astype(str))
@@ -300,7 +418,9 @@ def main():
     # 有行情：执行成交
     res = execute_day(sig_df, as_of, state, slip_map, prices)
     state["cash"] = res["cash"]
-    state["positions"] = {c: {"shares": float(h["shares"]), "cost": float(h["cost"])}
+    # 注意：必须保留 entry_date（起始日期功能依赖），缺省回填执行日
+    state["positions"] = {c: {"shares": float(h["shares"]), "cost": float(h["cost"]),
+                              "entry_date": h.get("entry_date", str(as_of.date()))}
                           for c, h in res["positions"].items()}
     state["nav"] = res["nav"]
     state["pending_buys"] = []

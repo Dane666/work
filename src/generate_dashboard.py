@@ -557,6 +557,9 @@ def main():
         print("└─ 补充完成")
 
     # ---- 计算每只持仓指标 ----
+    # 起始日期过滤：只保留信号日 >= SIM_START_DATE 的买入点（与 sim_tracker 消费口径一致）
+    start = getattr(config, "SIM_START_DATE", None)
+    start_ts = pd.Timestamp(start).normalize() if start else None
     rows = []
     for code in codes:
         h = positions[code]
@@ -572,7 +575,8 @@ def main():
         pnl_amt = shares * (last - cost)
         pnl_pct = (last / cost - 1.0) if cost > 0 else 0.0
         name = names.get(code, code)
-        bd = buy_dates.get(code, [])
+        bd = [sd for sd in buy_dates.get(code, [])
+              if start_ts is None or sd >= start_ts]   # 只保留起始日之后的买入信号
         buy_str = ""
         if bd:
             # 买入执行日 = 信号日之后第一个交易日；无 K 线时直接显示信号日
@@ -600,6 +604,16 @@ def main():
         plot_stock(r["code"], r["name"], r["df"], r["buy_dates"],
                    CHARTS_DIR / f"{r['code']}.png", args.days)
         n_plot += 1
+    # 清理不在当前持仓中的历史图表（避免 docs 目录与 GitHub 仓库无限膨胀）
+    if not args.max_charts:      # 全量生成时才清理（调试 --max-charts 不动历史文件）
+        valid = {r["code"] for r in rows}
+        removed = 0
+        for f in CHARTS_DIR.glob("*.png"):
+            if f.stem not in valid:
+                f.unlink()
+                removed += 1
+        if removed:
+            print(f"✓ 清理 {removed} 张已不在持仓中的历史图表")
     print(f"✓ 生成 {n_plot} 张持仓走势图 → docs/assets/charts/")
 
     plot_nav_curve(hist, DOCS_DIR / "assets" / "nav_curve.png")

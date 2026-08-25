@@ -69,7 +69,10 @@ jobs:
           for f in v8_close_panel.parquet v8_amount_panel.parquet v6_index.parquet \
                    roe_panel_v8.parquet gpm_yoy_panel_v8.parquet v3_ohlcv.pkl \
                    v6_amount_panel.parquet v8_universe.json \
-                   v8_ohlcv.pkl; do
+                   v8_ohlcv.pkl \
+                   mainboard_close_panel.parquet mainboard_amount_panel.parquet \
+                   roe_panel_mainboard.parquet gpm_yoy_panel_mainboard.parquet \
+                   div_yield_panel_mainboard.parquet mainboard_universe.json; do
             if [ ! -f "data/$f" ]; then
               echo "::error::缺失数据文件 data/$f —— 请本地更新面板后执行 git push origin data"
               missing=1
@@ -78,12 +81,13 @@ jobs:
           if [ "$missing" -ne 0 ]; then exit 1; fi
           echo "数据完整性校验通过"
 
-      - name: Run signal generator (V8.1)
+      - name: Run signal generator (V8.1 / 主板版V3)
         run: |
           cd src
           # GitHub Actions 无法访问 akshare 中国源，故不加 --live
           # （--live 会逐只股票请求实时行情并因超时卡死数小时）；
           # 实时刷新请在本机/云服务器执行。Actions 直接用 data 分支面板生成信号。
+          # config.USE_MAINBOARD=True → 主板版 V3 链路（收窄池+质量过滤+长动量+股息率门控）。
           python signal_generator.py
 
       - name: Run sim tracker

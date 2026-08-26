@@ -75,20 +75,28 @@ def apply_quality_mask(close_m, roe, amount, me, min_roe=MIN_ROE,
     return out
 
 
-def build_mz_v3(close_m, roe, gpm, me, long_momentum=True):
-    """动量/质量 Z-score 合成分：ret=(ret_12+ret_24)/2 与 ROE/毛利率 等权。
-    long_momentum=False 时退化为 ret_12（对照用）。"""
+def build_mz_v3(close_m, roe, gpm, me, long_momentum=True, persistence=True):
+    """动量/质量 Z-score 合成分。
+
+    persistence=True（方向1 动量持续性，当前默认）：
+        mz = (z(ret_12 - ret_3) + z(ret_24) + z(roe) + z(gpm_yoy)) / 4
+        动量持续性 ret_12-ret_3：长期动量扣除最近3月动量；数值大=长动量仍在、
+        短端已回落（避免追高接盘），数值小/负=动量已衰减。
+    persistence=False（V3.1 基线）：ret=(ret_12+ret_24)/2 与 ROE/毛利率 等权。
+    long_momentum 仅影响 persistence=False 路径（True 用 12/24m 均值，False 仅 ret_12）。
+    """
     ret12 = close_m.pct_change(FWD_DAYS * 12)
-    if long_momentum:
-        ret24 = close_m.pct_change(FWD_DAYS * 24)
-        ret12 = (ret12 + ret24) / 2.0
+    ret24 = close_m.pct_change(FWD_DAYS * 24)
+    if persistence:
+        ret3 = close_m.pct_change(FWD_DAYS * 3)
+        cols = {"ret_persist": ret12 - ret3, "ret_24": ret24, "roe": roe, "gpm_yoy": gpm}
+    else:
+        ret_v = (ret12 + ret24) / 2.0 if long_momentum else ret12
+        cols = {"ret_12": ret_v, "roe": roe, "gpm_yoy": gpm}
     rows = {}
     for t in pd.DatetimeIndex(me):
-        sub = pd.DataFrame({
-            "ret_12": ret12.loc[t] if t in ret12.index else pd.Series(dtype=float),
-            "roe": roe.loc[t],
-            "gpm_yoy": gpm.loc[t],
-        })
+        sub = pd.DataFrame({k: v.loc[t] if t in v.index else pd.Series(dtype=float)
+                            for k, v in cols.items()})
         sub = sub.dropna()
         if sub.empty:
             rows[t] = pd.Series(dtype=float)

@@ -108,3 +108,74 @@ def build_mz_v3(close_m, roe, gpm, me, long_momentum=True, persistence=True):
         z = (sub_w - sub_w.mean()) / sub_w.std(ddof=0)
         rows[t] = z.sum(axis=1) / sub_w.shape[1]
     return pd.DataFrame(rows).T.sort_index()
+
+
+def industry_cap(sector: str, bench: dict, cap_mult: float, min_cap: float) -> float:
+    """行业权重上限 = max(基准×cap_mult, min_cap)。
+    用户规则：持仓行业权重 ≤ 基准×2；基准<5% 时上限固定 10%。"""
+    b = bench.get(sector, 0.0)
+    return max(b * cap_mult, min_cap)
+
+
+def apply_sector_neutral(weights: dict, sector_of: dict, bench: dict,
+                         cap_mult: float = 2.0, min_cap: float = 0.10,
+                         max_iter: int = 10) -> dict:
+    """对目标持仓权重做行业中性化约束（迭代收敛，返回调整后 {code: weight}）。
+
+    规则：任一行业持仓权重 ≤ industry_cap(行业) = max(基准×cap_mult, min_cap)。
+    每轮：超限行业内部等比例缩至上限，释放权重按**行业剩余空间**（cap−当前）比例
+    分配给未超限行业（行业内按个股权重等比例，单行业分配额 ≤ 其剩余空间，保证不
+    制造新超限）；无剩余空间的部分转现金（总权重 ≤ 原总和）。最多 max_iter 轮；
+    权重归零（<1e-12）的标的移除。
+    weights: {code: weight}（占净值比例）；sector_of: {code: 行业}；bench: {行业: 市值权重}。
+    """
+    w = {c: max(0.0, wt) for c, wt in weights.items() if wt > 0}
+
+    def _cap(s):
+        return max(bench.get(s, 0.0) * cap_mult, min_cap)
+
+    for _ in range(max_iter):
+        ind_w = {}
+        for c, wt in w.items():
+            s = sector_of.get(c, "其他")
+            ind_w[s] = ind_w.get(s, 0.0) + wt
+        viol = {s: tw for s, tw in ind_w.items() if tw > _cap(s) + 1e-12}
+        if not viol:
+            break
+        freed = 0.0
+        for s, tw in viol.items():
+            scale = _cap(s) / tw
+            for c in list(w):
+                if sector_of.get(c, "其他") == s:
+                    w[c] *= scale
+            freed += tw - _cap(s)
+        if freed <= 1e-12:
+            break
+        # 重新汇总（缩仓后），按剩余空间分配
+        ind_w = {}
+        for c, wt in w.items():
+            s = sector_of.get(c, "其他")
+            ind_w[s] = ind_w.get(s, 0.0) + wt
+        headroom = {s: _cap(s) - tw for s, tw in ind_w.items() if tw < _cap(s) - 1e-12}
+        total_hr = sum(headroom.values())
+        if total_hr <= 1e-12:
+            break                       # 无剩余空间：未分配部分转现金
+        for c in list(w):
+            s = sector_of.get(c, "其他")
+            hr = headroom.get(s, 0.0)
+            ind_total = ind_w[s]
+            if hr > 0 and ind_total > 0:
+                add_ind = min(freed * hr / total_hr, hr)   # 单行业分配额 ≤ 剩余空间
+                w[c] += add_ind * (w[c] / ind_total)
+    return {c: wt for c, wt in w.items() if wt > 1e-12}
+
+
+def load_sector_data():
+    """加载行业映射 {code: 行业} 与月末市值基准 (date × industry)。
+    文件缺失返回 (None, None)——调用方应回退为不启用中性化。"""
+    if not config.SECTOR_IND_MAP.exists() or not config.SECTOR_IND_BENCH.exists():
+        return None, None
+    ind = pd.read_parquet(config.SECTOR_IND_MAP)
+    bench = pd.read_parquet(config.SECTOR_IND_BENCH)
+    sector_of = dict(zip(ind["code"].astype(str), ind["industry"]))
+    return sector_of, bench

@@ -359,6 +359,149 @@ def fetch_fundamentals(codes: list, trade_idx: pd.DatetimeIndex, limit: int = 0)
 
 
 # ============================================================================
+# 方向2：行业中性化数据（2026-08-26 追加）
+#   industry_map.parquet       pool 股票 → 申万一级行业（缺失归"其他"）
+#   industry_capital.parquet   pool 股票 → 注册资金（万元，≈总股本×面值，巨潮快照）
+#   industry_benchmark.parquet 月末 × 行业 市值权重（市值=注册资金×1e4×收盘价）
+# ============================================================================
+OUT_IND_MAP = config.DATA_DIR / "industry_map.parquet"
+OUT_IND_CAP = config.DATA_DIR / "industry_capital.parquet"
+OUT_IND_BENCH = config.DATA_DIR / "industry_benchmark.parquet"
+SW_MAP_LOCAL = config.DATA_DIR / "sw_industry_map.parquet"
+
+
+def get_pool_codes() -> list:
+    """方向2 基准池 = 回测选股池（V8 成分 ∩ 主板 60/00 ∩ mainboard 面板，1004 只）。"""
+    from fetch_dividend import get_v2_codes
+    return sorted(get_v2_codes())
+
+
+def fetch_industry_map(pool_codes: list = None, force: bool = False) -> pd.DataFrame:
+    """pool 股票 → 申万一级行业。优先复用本地 sw_industry_map.parquet（5207 只全市场，
+    2026-08-19 已抓）；缺失时尝试 ak.stock_industry_category_cninfo 增量，仍缺失归"其他"。
+    落盘 data/industry_map.parquet（code, industry）。"""
+    if pool_codes is None:
+        pool_codes = get_pool_codes()
+    out = None
+    if SW_MAP_LOCAL.exists():
+        sw = pd.read_parquet(SW_MAP_LOCAL)
+        sw = sw[["code", "industry"]].drop_duplicates("code")
+        out = sw[sw["code"].isin(pool_codes)].copy()
+    if out is None or out.empty:
+        print("[ind] 本地 sw_industry_map 缺失，尝试巨潮行业分类抓取")
+        try:
+            df = ak.stock_industry_category_cninfo(symbol="A股", date="2026-08-25")
+            out = df[["股票代码", "行业"]].rename(
+                columns={"股票代码": "code", "行业": "industry"})
+            out["code"] = out["code"].astype(str).str.zfill(6)
+            out = out[out["code"].isin(pool_codes)]
+        except Exception as e:
+            print(f"[ind] 巨潮行业分类失败: {e}")
+    missing = [c for c in pool_codes if c not in set(out["code"])]
+    if missing:
+        pad = pd.DataFrame({"code": missing, "industry": ["其他"] * len(missing)})
+        out = pd.concat([out, pad], ignore_index=True)
+    out.to_parquet(OUT_IND_MAP)
+    print(f"[ind] industry_map: {len(out)} 只（pool {len(pool_codes)}），"
+          f"行业数 {out['industry'].nunique()}，缺失归'其他' {len(missing)} 只")
+    return out
+
+
+def fetch_registered_capital(pool_codes: list = None, limit: int = 0,
+                             start_at: int = 0) -> pd.DataFrame:
+    """pool 股票注册资金（巨潮 stock_profile_cninfo 快照，万元 ≈ 总股本×面值 元口径）。
+    断点续跑：data/industry_capital.parquet 已存在的 code 跳过。
+    落盘 data/industry_capital.parquet（code, capital_wan）。"""
+    if pool_codes is None:
+        pool_codes = get_pool_codes()
+    codes = pool_codes[start_at:]
+    if limit:
+        codes = codes[:limit]
+    parts = []
+    done = set()
+    if OUT_IND_CAP.exists():
+        prev = pd.read_parquet(OUT_IND_CAP)
+        parts.append(prev)
+        done = set(prev["code"].unique())
+        print(f"[cap] 断点续传：已完成 {len(done)} 只")
+
+    ok, fail = 0, 0
+    t0 = time.time()
+    for i, code in enumerate(codes, 1):
+        if code in done:
+            ok += 1
+            continue
+        cap = None
+        for attempt in range(3):
+            try:
+                df = ak.stock_profile_cninfo(symbol=code)
+                if df is not None and len(df):
+                    raw = str(df.iloc[0]["注册资金"]).strip()
+                    cap = float(raw) if raw and raw.lower() not in ("nan", "none", "-") else None
+                break
+            except Exception:
+                time.sleep(1.5 * (attempt + 1))
+        if cap is not None:
+            parts.append(pd.DataFrame([{"code": code, "capital_wan": cap}]))
+            ok += 1
+        else:
+            fail += 1
+            print(f"  skip {code}（注册资金不可得）")
+        if i % 50 == 0:
+            pd.concat(parts, ignore_index=True).to_parquet(OUT_IND_CAP)
+            print(f"  [cap] 进度 {i}/{len(codes)} 成功 {ok} 失败 {fail} "
+                  f"耗时 {(time.time()-t0)/60:.1f}min")
+        time.sleep(0.15)
+    if parts:
+        pd.concat(parts, ignore_index=True).to_parquet(OUT_IND_CAP)
+    comb = pd.read_parquet(OUT_IND_CAP) if OUT_IND_CAP.exists() else pd.DataFrame(
+        columns=["code", "capital_wan"])
+    print(f"[cap] 注册资金快照完成：{comb['code'].nunique()} 只（本批成功 {ok} 失败 {fail}）")
+    return comb
+
+
+def build_industry_benchmark(close_panel: pd.DataFrame = None,
+                             month_ends=None) -> pd.DataFrame:
+    """月末 × 行业 市值权重基准。市值 = 注册资金(万元)×1e4 × 收盘价（qfq）。
+    权重 = 行业市值 / 全池市值。落盘 data/industry_benchmark.parquet。"""
+    if close_panel is None:
+        close_panel = pd.read_parquet(config.MB_CLOSE)
+    from factors import get_month_end_dates
+    ind = pd.read_parquet(OUT_IND_MAP)
+    cap = pd.read_parquet(OUT_IND_CAP)
+    cap_map = dict(zip(cap["code"], cap["capital_wan"]))
+    ind_map = dict(zip(ind["code"], ind["industry"]))
+    pool = [c for c in close_panel.columns if c in cap_map and c in ind_map]
+    if month_ends is None:
+        me = get_month_end_dates(close_panel.index)
+        month_ends = pd.DatetimeIndex(me).normalize()
+    me = pd.DatetimeIndex(month_ends).normalize()
+
+    shares = pd.Series({c: cap_map[c] * 1e4 for c in pool})   # 股本(股)，静态快照
+    rows = []
+    for t in me:
+        if t not in close_panel.index:
+            continue
+        px = close_panel.loc[t, pool].astype(float)
+        mcap = (px * shares).dropna()
+        if mcap.empty or mcap.sum() <= 0:
+            continue
+        total = mcap.sum()
+        by_ind = {}
+        for c, mv in mcap.items():
+            s = ind_map.get(c, "其他")
+            by_ind[s] = by_ind.get(s, 0.0) + mv
+        row = {s: v / total for s, v in by_ind.items()}
+        row["date"] = t
+        rows.append(row)
+    bench = pd.DataFrame(rows).set_index("date").sort_index()
+    bench.to_parquet(OUT_IND_BENCH)
+    print(f"[ind] industry_benchmark: {bench.shape[0]} 个月末 × {bench.shape[1]} 行业，"
+          f"覆盖 pool {len(pool)} 只")
+    return bench
+
+
+# ============================================================================
 def main():
     ap = argparse.ArgumentParser(description="主板版数据抓取")
     ap.add_argument("--limit", type=int, default=0, help="试跑：只抓前 N 只")
@@ -366,9 +509,21 @@ def main():
     ap.add_argument("--daily-only", action="store_true", help="只抓日线")
     ap.add_argument("--fin-only", action="store_true", help="只抓财报")
     ap.add_argument("--refresh-names", action="store_true", help="强制刷新名称列表")
+    ap.add_argument("--industry-map", action="store_true",
+                    help="方向2：行业映射 + 注册资金快照 + 市值基准（不抓行情）")
     args = ap.parse_args()
 
     t0 = time.time()
+
+    if args.industry_map:
+        pool = get_pool_codes()
+        print(f"[main] 方向2 基准池 {len(pool)} 只")
+        fetch_industry_map(pool)
+        fetch_registered_capital(pool, limit=args.limit, start_at=args.start)
+        build_industry_benchmark()
+        print(f"\n=== 方向2 行业数据就绪 === 耗时 {(time.time()-t0)/60:.1f} 分钟")
+        return
+
     codes = get_universe_mainboard(refresh=args.refresh_names)
     (config.DATA_DIR / "mainboard_universe.json").write_text(
         json.dumps(codes), encoding="utf-8")

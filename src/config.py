@@ -128,6 +128,20 @@ ANALYST_CROWDED_DISCOUNT = 0.70       # 模块2：拥挤行业个股权重折扣
 ANALYST_WEEKLY_SLIPPAGE_UPLIFT = 1.50 # 模块3：周频滑点上浮倍数（0.1/0.3/0.5% → 0.15/0.45/0.75%）
 
 # ----------------------------------------------------------------------------
+# 方向2：行业中性化持仓（feature/momentum-sector-opt 分支实验开关）
+# ----------------------------------------------------------------------------
+# ENABLE_SECTOR_NEUTRAL=True 时，月末调仓对目标持仓做行业上限约束：
+#   行业持仓权重 ≤ max(基准权重×2, 10%)；基准权重 = 该行业在主板池的市值权重
+#   （市值 = 注册资金×1e4×收盘价，industry_benchmark.parquet）。
+#   超额部分等比例分配到未超限行业持仓，最多迭代 SECTOR_MAX_ITER 轮；权重归零移除。
+ENABLE_SECTOR_NEUTRAL = True
+SECTOR_CAP_MULT = 2.0            # 行业上限 = 基准权重 × 2
+SECTOR_MIN_CAP = 0.10            # 基准权重 < 5% 时上限固定 10%
+SECTOR_MAX_ITER = 10             # 循环调整最大迭代次数
+SECTOR_IND_MAP = DATA_DIR / "industry_map.parquet"
+SECTOR_IND_BENCH = DATA_DIR / "industry_benchmark.parquet"
+
+# ----------------------------------------------------------------------------
 # V8.1 执行口径对齐开关（回测价格 vs 模拟盘/实盘执行价格）
 # ----------------------------------------------------------------------------
 # EXECUTION_PRICE: "close"（信号日收盘价成交，V8 原口径）| "next_open"（信号日收盘

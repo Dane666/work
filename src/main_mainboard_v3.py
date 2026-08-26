@@ -164,15 +164,65 @@ def build_mz(close_m, roe, gpm, me, long_momentum=True, persistence=True):
     return pd.DataFrame(rows).T.sort_index()
 
 
-def run_full(close_m, amount, sel_v8, me, tw):
-    """分区间回测：段1 V8(≤2023) → 段2 E等权(≥2024)。返回拼接净值。"""
+def run_full(close_m, amount, sel_v8, me, tw, enable_sector=None,
+             sector_map=None, bench=None, conc_log=None):
+    """分区间回测：段1 V8(≤2023) → 段2 E等权(≥2024)。返回拼接净值。
+    enable_sector=None → 跟随 config.ENABLE_SECTOR_NEUTRAL（方向2 开关）；
+    显式 True/False 供对比实验。sector_map/bench 可外部注入（None 时自动加载）。
+    conc_log：若提供 list，则记录各月末目标持仓的行业集中度（验证约束生效）。"""
+    from v3_common import apply_sector_neutral, load_sector_data
+    if enable_sector is None:
+        enable_sector = bool(getattr(config, "ENABLE_SECTOR_NEUTRAL", False))
+    if enable_sector and (sector_map is None or bench is None):
+        sector_map, bench = load_sector_data()
+        if sector_map is None or bench is None:
+            print("  [sector] ⚠️ 行业数据缺失，本段跳过中性化")
+            enable_sector = False
+
+    def _bench_row(t):
+        if bench is None or t not in bench.index:
+            return {}
+        return {str(k): float(v) for k, v in bench.loc[t].items()}
+
+    def _log_conc(t, weights, mode):
+        if conc_log is None or sector_map is None:
+            return
+        ind_w = {}
+        for c, wt in weights.items():
+            s = sector_map.get(str(c), "其他")
+            ind_w[s] = ind_w.get(s, 0.0) + wt
+        if not ind_w:
+            return
+        top = sorted(ind_w.items(), key=lambda kv: -kv[1])
+        conc_log.append({
+            "date": str(t.date()), "mode": mode, "top1_industry": top[0][0],
+            "top1_weight": top[0][1], "n_industries": len(ind_w),
+            "top3_weight": sum(v for _, v in top[:3]),
+        })
+
     sel_trend = sig_trend(close_m, me, top_n=TOP_N)
     sel_brk = sig_breakout(close_m, amount, me, top_n=TOP_N)
     me1 = me[me < pd.Timestamp(SPLIT_DATE)]
     me2 = me[me >= pd.Timestamp(SPLIT_DATE)]
+
+    # 段1 V8：selection 列表 → 等权；enable_sector 时中性化后经 weight_mult 注入
+    wmult = {} if enable_sector else None
+    for t in me1:
+        cc = sel_v8.get(t, [])
+        if not cc:
+            continue
+        w0 = {c: 1.0 / len(cc) for c in cc}
+        _log_conc(t, w0, "raw")
+        if enable_sector:
+            w1 = apply_sector_neutral(w0, sector_map, _bench_row(t))
+            for c in cc:
+                wmult[(t, c)] = w1.get(c, 0.0) / 0.10   # target = 0.10*eq*mult = wt*eq
+            _log_conc(t, w1, "neutral")
     eq1, _ = run_backtest_v5(close_m, sel_v8, me1, config.START_DATE, "2023-12-31",
-                             target_weight=tw, slippage_map=slip_map_)
+                             target_weight=tw, slippage_map=slip_map_, weight_mult=wmult)
     init2 = float(eq1.iloc[-1])
+
+    # 段2 E等权组合：V8/Trend/Breakout 各 1/3，单只 ≤ CAP
     sched = {}
     for t in me2:
         acc = {}
@@ -184,6 +234,12 @@ def run_full(close_m, amount, sel_v8, me, tw):
             for c in cc:
                 acc[c] = min(acc.get(c, 0.0) + we, CAP)
         sched[t] = list(acc.items())
+    if enable_sector:
+        for t in me2:
+            w1 = apply_sector_neutral(dict(sched[t]), sector_map, _bench_row(t))
+            sched[t] = list(w1.items())
+    for t in me2:
+        _log_conc(t, dict(sched[t]), "neutral" if enable_sector else "raw")
     eq2, _ = run_backtest_combo(close_m, sched, me2, SPLIT_DATE, str(close_m.index[-1].date()),
                                 target_weight=tw, slippage_map=slip_map_, init_capital=init2)
     eq = pd.concat([eq1, eq2])

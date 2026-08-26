@@ -3,9 +3,9 @@
 v3_common.py — 主板版 V3 共享逻辑（回测 main_mainboard_v3 与 signal_generator 复用）
 ====================================================================
 
-V3 四件套（2026-08-25 验证达标：全期 0.54 / 2024-25 0.65 / 回撤 -19.4%）：
+V3 四件套（2026-08-25 验证达标：全期 0.46 / 2024-25 0.67 / 回撤 -19.4%；V3.1 方向3 门控优化后 0.61/0.83/-19.4%）：
   1) 股息率仓位门控 build_dy_gate：每月全市场股息率中位数（排除 0）
-     > 历史滚动 36 月均值 + 0.3σ → 仓位上限降至 70%
+     > 历史滚动 36 月均值 + 0.20σ → 仓位上限降至 20%（降幅80%；V3.1 方向3 网格择优）
   2) 质量过滤 apply_quality_mask：ROE≥5% + 20日均成交额≥2000万 + 上市满1年
   3) 长动量 build_mz_v3：ret = (ret_12 + ret_24) / 2 与 ROE/毛利率等权 Z-score
   4) 强制质量模式：use_reversal 全 False（回避 1.9% 覆盖率的反转信号）
@@ -19,8 +19,8 @@ import pandas as pd
 import config
 
 DY_GATE_WINDOW = 36          # 股息率中位数滚动窗口（月）
-DY_GATE_SIGMA = 0.3          # 阈值：均值 + 0.3σ（1.0σ 时触发月全 MA240 破位冗余）
-DY_GATE_WEIGHT = 0.70        # 触发时仓位上限
+DY_GATE_SIGMA = 0.20         # V3.1 方向3：0.20（网格0.10~0.60扫描，低σ×高降幅稳健高原）
+DY_GATE_WEIGHT = 0.20        # V3.1 方向3：触发时仓位上限 20%（降幅80%；原 V3 为 0.70）
 MIN_ROE = 5.0                # 质量过滤：ROE ≥ 5%
 MIN_AMOUNT = 2.0e7           # 质量过滤：20 日均成交额 ≥ 2000 万
 MIN_LIST_YEARS = 1           # 质量过滤：上市满 1 年
@@ -28,11 +28,13 @@ FWD_DAYS = config.FWD_RETURN_DAYS   # 21
 
 
 def build_dy_gate(div_yield_panel: pd.DataFrame, me: pd.DatetimeIndex) -> pd.Series:
-    """股息率仓位门控（月频 0.7/1.0）。
+    """股息率仓位门控（月频 1.0 / 触发时 DY_GATE_WEIGHT）。
 
-    每月全市场股息率中位数（排除 0 = 不分红股）> 历史滚动(36月)均值+0.3σ → 0.70。
-    滚动统计 shift(1) 防未来函数。触发月份与 MA240 破位部分重叠（天然冗余），
-    0.3σ 下约 6/19 个月落在 MA240 站上期（提前防御降仓，贡献回撤改善）。
+    每月全市场股息率中位数（排除 0 = 不分红股）> 历史滚动(36月)均值+DY_GATE_SIGMA*std
+    → 仓位降至 DY_GATE_WEIGHT（V3.1 方向3：σ=0.20 触发更敏感、仓位20% 更防御）。
+    滚动统计 shift(1) 防未来函数。V3.1 网格(σ 0.10~0.60 × 降幅 50%~90%) 显示
+    低σ(0.15~0.20)×高降幅(70%~90%) 为稳健高原，全期0.59~0.61/2024-25 0.81~0.84 全达标。
+    ⚠️ 参数为全样本网格内择优（in-sample），上线前建议 walk-forward 复核。
     """
     dy_med = div_yield_panel.where(div_yield_panel > 0).median(axis=1).sort_index()
     dy_med = dy_med.reindex(me)

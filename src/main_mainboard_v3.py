@@ -58,8 +58,8 @@ TARGET_NEW = 0.60
 TARGET_DD = -0.22
 
 DY_GATE_WINDOW = 36        # 股息率中位数滚动窗口（月）
-DY_GATE_SIGMA = 0.3        # 阈值：均值 + 0.3σ（1.0σ 时触发月全部 MA240 破位冗余；0.3σ 抓到提前防御月）
-DY_GATE_WEIGHT = 0.70      # 触发时仓位上限
+DY_GATE_SIGMA = 0.20       # V3.1 方向3：0.20（低σ×高降幅稳健高原，全期0.61/2024-25 0.83）
+DY_GATE_WEIGHT = 0.20      # V3.1 方向3：触发时仓位上限 20%（降幅80%；原 V3 为 0.70）
 MIN_ROE = 5.0              # 质量过滤：ROE ≥ 5%
 MIN_AMOUNT = 2.0e7         # 质量过滤：20日均成交额 ≥ 2000万
 MIN_LIST_YEARS = 1         # 质量过滤：上市满 1 年

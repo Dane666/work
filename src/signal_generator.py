@@ -524,8 +524,8 @@ def main():
     for _, r in df[df["action"].isin(["BUY", "HOLD"])].head(15).iterrows():
         print(f"    {r['code']}  {r['name']}  {r['action']}  目标{float(r['target_weight']):.2f}%")
 
-    # ---- Bark 推送：今日信号（可选；未配置 BARK_KEY 自动跳过，失败静默）----
-    bark_key = getattr(config, "BARK_KEY", "") or os.environ.get("BARK_KEY", "")
+    # ---- Bark 推送：今日信号（可选；未配置 BARK_DEVICE_KEY 自动跳过，失败静默）----
+    bark_key = getattr(config, "BARK_DEVICE_KEY", "") or os.environ.get("BARK_DEVICE_KEY", "")
     if bark_key and len(df):
         try:
             # 调仓日判定：本月末截面信号首次生成（此前无落在 [last_me, as_of) 的信号文件）

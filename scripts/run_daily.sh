@@ -33,9 +33,9 @@ LOG_FILE="$SCRIPT_DIR/../output/cron.log"
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
 
 # ---- Bark 推送密钥（可选）----
-# 传递 BARK_KEY 给 signal_generator.py / sim_tracker.py（脚本内未配置时自动跳过推送，不中断）。
-# 本地可 export BARK_KEY=xxx 或写项目根目录 .env（BARK_KEY=xxx）；Actions 由 secrets 注入同名变量。
-export BARK_KEY="${BARK_KEY:-}"
+# 传递 BARK_DEVICE_KEY 给 signal_generator.py / sim_tracker.py（脚本内未配置时自动跳过推送，不中断）。
+# 本地可 export BARK_DEVICE_KEY=xxx 或写项目根目录 .env（BARK_DEVICE_KEY=xxx）；Actions 由 secrets 注入同名变量。
+export BARK_DEVICE_KEY="${BARK_DEVICE_KEY:-}"
 cd "$SRC_DIR"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] === V7.1 每日任务开始 ==="

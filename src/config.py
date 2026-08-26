@@ -37,9 +37,9 @@ SIM_START_DATE = "2026-01-01"                             # 或 None
 # ----------------------------------------------------------------------------
 # Bark 手机推送（模拟盘通知；未配置则自动跳过，不影响主流程）
 # ----------------------------------------------------------------------------
-# 优先级：环境变量 BARK_KEY > 兼容旧 BARK_DEVICE_KEY；也支持项目根目录 .env 注入。
-# GitHub Actions 通过 Secrets 注入 BARK_KEY；本地/云服务器 export BARK_KEY=... 即可。
-BARK_KEY = os.environ.get("BARK_KEY", "") or os.environ.get("BARK_DEVICE_KEY", "")
+# 变量名（统一）：仅使用 BARK_DEVICE_KEY（环境变量 / 项目根目录 .env）。
+# GitHub Actions 通过 Secrets 注入 BARK_DEVICE_KEY；本地/云服务器 export BARK_DEVICE_KEY=... 即可。
+BARK_DEVICE_KEY = os.environ.get("BARK_DEVICE_KEY", "")
 
 # ----------------------------------------------------------------------------
 # 主板版数据面板（60/00 开头选股池，fetch_mainboard.py 产出）

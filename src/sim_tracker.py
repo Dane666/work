@@ -435,7 +435,7 @@ def main():
     save_state(state)
 
     # ---- Bark 推送①：今日执行（盘前成交清单；可选，未配置 key 自动跳过）----
-    bark_key = getattr(config, "BARK_KEY", "") or os.environ.get("BARK_KEY", "")
+    bark_key = getattr(config, "BARK_DEVICE_KEY", "") or os.environ.get("BARK_DEVICE_KEY", "")
     if bark_key:
         buys_ex = res.get("buys_executed", [])
         sells_ex = res.get("sells_executed", [])

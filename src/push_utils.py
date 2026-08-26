@@ -10,9 +10,9 @@ push_utils.py — Bark 推送工具（模拟盘通知专用，自包含版）
 设计约束：
   - 不改变任何策略逻辑；推送失败一律静默降级（打印 warning，返回 False，不抛异常），
     避免中断 signal_generator / sim_tracker / CI 主流程。
-  - Key 解析优先级：显式参数 > 环境变量 BARK_KEY > 兼容旧 BARK_DEVICE_KEY。
+  - Key 解析优先级：显式参数 > 环境变量 BARK_DEVICE_KEY（兼容旧 BARK_KEY 仍可用）。
   - 支持完整 URL 形式传入 key（自动提取末尾 device key）。
-  - 本地支持 .env 文件（项目根目录）注入 BARK_KEY，GitHub Actions 用 secrets 注入同名变量。
+  - 本地支持 .env 文件（项目根目录）注入 BARK_DEVICE_KEY，GitHub Actions 用 secrets 注入同名变量。
 
 用法：
   from push_utils import push_to_bark, format_stock_list, format_percent
@@ -54,11 +54,11 @@ def _ensure_env() -> None:
         pass
 
 
-_ensure_env()   # 模块导入时装载 .env（BARK_KEY 等）
+_ensure_env()   # 模块导入时装载 .env（BARK_DEVICE_KEY 等）
 
 
 def _resolve_key(key):
-    key = (key or os.environ.get("BARK_KEY") or os.environ.get("BARK_DEVICE_KEY") or "").strip()
+    key = (key or os.environ.get("BARK_DEVICE_KEY") or os.environ.get("BARK_KEY") or "").strip()
     if not key:
         return ""
     # URL 格式（https://api.day.app/<xxx>）→ 提取末尾 key
@@ -73,7 +73,7 @@ def push_to_bark(title: str, body: str, key: str = None) -> bool:
     try:
         k = _resolve_key(key)
         if not k:
-            print("[bark] 未配置 BARK_KEY，跳过推送")
+            print("[bark] 未配置 BARK_DEVICE_KEY，跳过推送")
             return False
         title = str(title)[:200]
         body = str(body)[:MAX_BODY]

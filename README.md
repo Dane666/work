@@ -159,21 +159,21 @@ docker run --rm \
 
 ### 2. 配置方式（三选一）
 
-**A. GitHub Actions（推荐云端）**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，新增 `BARK_KEY`，值为你的 Bark Key。工作流已为 `signal_generator.py` / `sim_tracker.py` 注入 `env: BARK_KEY: ${{ secrets.BARK_KEY }}`（并同时注入旧 secret `BARK_DEVICE_KEY` 兜底，**两者配置其一即可**），无需改 workflow。未配置时脚本自动跳过推送，主流程不受影响。
+**A. GitHub Actions（推荐云端）**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，新增 `BARK_DEVICE_KEY`，值为你的 Bark Key。工作流已为 `signal_generator.py` / `sim_tracker.py` 注入 `env: BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}`，无需改 workflow。未配置时脚本自动跳过推送，主流程不受影响。
 
 **B. 本地/云服务器**：直接 export 后运行 `scripts/run_daily.sh`（脚本已透传该变量）：
 ```bash
-export BARK_KEY=xxxxxxxxxxxxxxxx
+export BARK_DEVICE_KEY=xxxxxxxxxxxxxxxx
 bash scripts/run_daily.sh
 ```
 **C. 项目根目录 .env 文件**（脚本启动时自动读取，无需 export）：
 ```bash
-echo "BARK_KEY=xxxxxxxxxxxxxxxx" >> .env
+echo "BARK_DEVICE_KEY=xxxxxxxxxxxxxxxx" >> .env
 ```
 
 ### 3. 兼容与失败处理
 
-- 兼容旧变量 `BARK_DEVICE_KEY`（优先级：`BARK_KEY` > `BARK_DEVICE_KEY`）。
+- 变量名统一为 `BARK_DEVICE_KEY`（兼容旧 `BARK_KEY` 仍可被脚本识别）。
 - 推送失败一律**静默跳过**（打印 warning、不抛异常），不会中断信号生成 / 模拟盘 / CI。
-- 本地预览推送效果：`cd src && BARK_KEY=你的key python signal_generator.py`。
+- 本地预览推送效果：`cd src && BARK_DEVICE_KEY=你的key python signal_generator.py`。
 - 推送实现：`src/push_utils.py`（`push_to_bark` / `format_stock_list` / `format_percent`）。

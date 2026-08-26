@@ -142,3 +142,38 @@ docker run --rm \
 - Breakout（接近20日高点+放量）2024-25 夏普 0.88 极强但全期回撤 -35.8%，未独立上线；
   并入 E 等权组合后 2024-25 显著增强（0.79 vs 0.67）。
 - 详细报告见 `output/report_v8_1_split.html`、`report_v8_1_next_open.html`。
+
+## 八、推送配置（Bark 手机通知）
+
+模拟盘每天在三个节点推送 Bark 通知（**纯附加功能，不影响任何策略逻辑**）：
+
+| 节点 | 触发脚本 | 标题 | 内容 |
+|---|---|---|---|
+| 今日信号 | `signal_generator.py` | 📈 今日信号 {日期} | 目标持仓前 10（代码/名称/权重）、共 N 只；调仓日标注 🔄 次日开盘执行 |
+| 今日执行 | `sim_tracker.py` | 💰 今日执行 {日期} | 实际买入清单（代码/名称/成交价/数量）与卖出清单（代码/名称/成交价），过长截断 |
+| 收盘净值 | `sim_tracker.py` | 📊 收盘净值 {日期} | NAV、当日/累计收益、持仓数、现金占比、CSI300 基准对比 |
+
+### 1. 获取 Bark Key
+
+- iOS 安装 [Bark](https://github.com/Finb/Bark) App，打开后复制你的设备 Key（形如 `xxxxxxxxxxxxxxxx`，或完整推送 URL `https://api.day.app/<key>`，脚本会自动提取末尾 key）。
+
+### 2. 配置方式（三选一）
+
+**A. GitHub Actions（推荐云端）**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，新增 `BARK_KEY`，值为你的 Bark Key。工作流已为 `signal_generator.py` / `sim_tracker.py` 注入 `env: BARK_KEY: ${{ secrets.BARK_KEY }}`，无需改 workflow。未配置时脚本自动跳过推送，主流程不受影响。
+
+**B. 本地/云服务器**：直接 export 后运行 `scripts/run_daily.sh`（脚本已透传该变量）：
+```bash
+export BARK_KEY=xxxxxxxxxxxxxxxx
+bash scripts/run_daily.sh
+```
+**C. 项目根目录 .env 文件**（脚本启动时自动读取，无需 export）：
+```bash
+echo "BARK_KEY=xxxxxxxxxxxxxxxx" >> .env
+```
+
+### 3. 兼容与失败处理
+
+- 兼容旧变量 `BARK_DEVICE_KEY`（优先级：`BARK_KEY` > `BARK_DEVICE_KEY`）。
+- 推送失败一律**静默跳过**（打印 warning、不抛异常），不会中断信号生成 / 模拟盘 / CI。
+- 本地预览推送效果：`cd src && BARK_KEY=你的key python signal_generator.py`。
+- 推送实现：`src/push_utils.py`（`push_to_bark` / `format_stock_list` / `format_percent`）。

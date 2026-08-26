@@ -5,6 +5,7 @@
 """
 
 from pathlib import Path
+import os
 
 # ----------------------------------------------------------------------------
 # 路径配置
@@ -32,6 +33,13 @@ V8_OHLCV_CKPT = DATA_DIR / "_v8_ohlcv_ckpt.pkl"           # OHLC 抓取检查点
 #   - generate_dashboard：只标注信号日 >= SIM_START_DATE 的买入点
 # 设为 None 表示从回测结束点自然延续（V8.1 原默认行为）。
 SIM_START_DATE = "2026-01-01"                             # 或 None
+
+# ----------------------------------------------------------------------------
+# Bark 手机推送（模拟盘通知；未配置则自动跳过，不影响主流程）
+# ----------------------------------------------------------------------------
+# 优先级：环境变量 BARK_KEY > 兼容旧 BARK_DEVICE_KEY；也支持项目根目录 .env 注入。
+# GitHub Actions 通过 Secrets 注入 BARK_KEY；本地/云服务器 export BARK_KEY=... 即可。
+BARK_KEY = os.environ.get("BARK_KEY", "") or os.environ.get("BARK_DEVICE_KEY", "")
 
 # ----------------------------------------------------------------------------
 # 主板版数据面板（60/00 开头选股池，fetch_mainboard.py 产出）

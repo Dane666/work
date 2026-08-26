@@ -53,6 +53,7 @@ import pandas as pd
 
 import config
 from stress_test_v6 import build_slippage_map
+from push_utils import push_to_bark, format_stock_list, format_percent
 
 
 NAV_DIR = config.OUTPUT_DIR / "sim_nav"
@@ -283,6 +284,8 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
     budget = regime_w * cap          # 本周期可部署上限（现金口径，市场门控）
     deployed = sum(h["shares"] * h["cost"] for h in positions.values())  # 现有持仓实际占用现金
 
+    buys_executed, sells_executed = [], []   # 实际成交明细（仅用于 Bark 推送，不影响策略）
+
     for r in buys:
         c = str(r["code"])
         if c in positions:
@@ -310,6 +313,8 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
                         "entry_date": str(date.date())}   # 起始日期功能：记录建仓日
         cash -= alloc
         deployed += alloc
+        buys_executed.append({"code": c, "name": str(r["name"]),
+                              "price": buy_price, "shares": shares})
 
     # 收盘：执行 SELL（清仓跌出 Top30 的标的）
     for r in sells:
@@ -324,6 +329,7 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
         proceeds = positions[c]["shares"] * sell_price
         cash += proceeds
         del positions[c]
+        sells_executed.append({"code": c, "name": str(r["name"]), "price": sell_price})
 
     # 以收盘价标记持仓市值
     pos_val = 0.0
@@ -334,7 +340,8 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
         else:
             pos_val += h["shares"] * h["cost"]      # 无当日价则沿用成本
     nav = cash + pos_val
-    return {"cash": cash, "positions": positions, "nav": nav, "pos_val": pos_val}
+    return {"cash": cash, "positions": positions, "nav": nav, "pos_val": pos_val,
+            "buys_executed": buys_executed, "sells_executed": sells_executed}
 
 
 # ---------------------------------------------------------------------------
@@ -427,6 +434,29 @@ def main():
     state["pending_sells"] = []
     save_state(state)
 
+    # ---- Bark 推送①：今日执行（盘前成交清单；可选，未配置 key 自动跳过）----
+    bark_key = getattr(config, "BARK_KEY", "") or os.environ.get("BARK_KEY", "")
+    if bark_key:
+        buys_ex = res.get("buys_executed", [])
+        sells_ex = res.get("sells_executed", [])
+        if buys_ex or sells_ex:
+            try:
+                body_parts = []
+                if buys_ex:
+                    body_parts.append("买入：")
+                    body_parts.append(format_stock_list(
+                        [(b["code"], b["name"], f"@{b['price']:.2f}", f"{b['shares']:.0f}股")
+                         for b in buys_ex], max_display=10))
+                if sells_ex:
+                    body_parts.append("卖出：")
+                    body_parts.append(format_stock_list(
+                        [(s["code"], s["name"], f"@{s['price']:.2f}")
+                         for s in sells_ex], max_display=10))
+                push_to_bark(f"💰 今日执行 {as_of.strftime('%Y-%m-%d')}",
+                             "\n".join(body_parts), key=bark_key)
+            except Exception as e:
+                print(f"[bark] 执行推送异常（静默跳过）: {e}")
+
     # 基准 & 跟踪误差
     bench = load_benchmark(state.get("init_date") or as_of)
     b_nav = float(bench.get(as_of, bench.iloc[-1])) if as_of in bench.index else bench.iloc[-1]
@@ -449,6 +479,21 @@ def main():
     print(f"[{datetime.now()}] 执行完成：NAV={res['nav']:.4f} 现金={res['cash']:.2%} "
           f"持仓市值={res['pos_val']:.4f} 累计收益={cum_ret:+.2%} "
           f"跟踪误差(20日)={te if te==te else 'NA'}")
+
+    # ---- Bark 推送②：收盘净值（可选）----
+    if bark_key:
+        try:
+            holdings_count = len(state["positions"])
+            cash_ratio = state["cash"] / res["nav"] if res["nav"] else 0.0
+            bench_ret = float(b_nav) - 1.0 if b_nav == b_nav else None
+            body = (f"NAV: {res['nav']:.4f}\n"
+                    f"当日: {format_percent(daily_ret, signed=True)}   "
+                    f"累计: {format_percent(cum_ret, signed=True)}\n"
+                    f"持仓: {holdings_count} 只  现金: {format_percent(cash_ratio)}\n"
+                    f"基准(CSI300): {format_percent(bench_ret, signed=True)}")
+            push_to_bark(f"📊 收盘净值 {as_of.strftime('%Y-%m-%d')}", body, key=bark_key)
+        except Exception as e:
+            print(f"[bark] 收盘推送异常（静默跳过）: {e}")
 
 
 def _read_nav() -> pd.DataFrame:

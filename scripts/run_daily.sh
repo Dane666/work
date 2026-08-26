@@ -22,15 +22,20 @@ set -e
 # 或直接 PYTHON=/opt/stategy/.venv/bin/python bash scripts/run_daily.sh
 PYTHON="${PYTHON:-python3}"
 
+# ---- 定位 src 目录（本脚本位于 project/scripts/）----
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_DIR="$SCRIPT_DIR/../src"
+
 # ---- 日志文件（cron 重定向之外，预警模块也写入此文件）----
 LOG_FILE="$SCRIPT_DIR/../output/cron.log"
 
 # ---- 清代理（与回测脚本一致）----
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
 
-# ---- 定位 src 目录（本脚本位于 project/scripts/）----
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$SCRIPT_DIR/../src"
+# ---- Bark 推送密钥（可选）----
+# 传递 BARK_KEY 给 signal_generator.py / sim_tracker.py（脚本内未配置时自动跳过推送，不中断）。
+# 本地可 export BARK_KEY=xxx 或写项目根目录 .env（BARK_KEY=xxx）；Actions 由 secrets 注入同名变量。
+export BARK_KEY="${BARK_KEY:-}"
 cd "$SRC_DIR"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] === V7.1 每日任务开始 ==="

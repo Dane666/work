@@ -59,6 +59,7 @@ from market_filter import build_ma240_vol_target_weight
 from stress_test_v6 import build_ohlcv_full, build_slippage_map
 from strategies.trend_ema import gen_signal as sig_trend
 from strategies.vol_breakout import gen_signal as sig_breakout
+from push_utils import push_to_bark, format_stock_list
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +523,26 @@ def main():
     print(f"[{datetime.now()}] 目标持仓(Top 15, 按权重序):")
     for _, r in df[df["action"].isin(["BUY", "HOLD"])].head(15).iterrows():
         print(f"    {r['code']}  {r['name']}  {r['action']}  目标{float(r['target_weight']):.2f}%")
+
+    # ---- Bark 推送：今日信号（可选；未配置 BARK_KEY 自动跳过，失败静默）----
+    bark_key = getattr(config, "BARK_KEY", "") or os.environ.get("BARK_KEY", "")
+    if bark_key and len(df):
+        try:
+            # 调仓日判定：本月末截面信号首次生成（此前无落在 [last_me, as_of) 的信号文件）
+            prev_sig_dates = [pd.Timestamp(f.replace("_signal.csv", ""))
+                              for f in os.listdir(signal_dir) if f.endswith("_signal.csv")]
+            is_rebalance = not any((d >= last_me) & (d < as_of) for d in prev_sig_dates)
+            # 目标持仓前 10（df 已按 target_weight 降序）
+            top = df[df["action"].isin(["BUY", "HOLD"])].head(10)
+            lines = [(r.code, r.name, f"目标{float(r.target_weight):.2f}%")
+                     for r in top.itertuples()]
+            body = format_stock_list(lines, max_display=10)
+            body += f"\n共 {len(targets)} 只 | 分段 {seg} | 目标仓位 {tw_last:.0%}"
+            if is_rebalance:
+                body += "\n🔄 调仓日，次日开盘执行"
+            push_to_bark(f"📈 今日信号 {as_of.strftime('%Y-%m-%d')}", body, key=bark_key)
+        except Exception as e:
+            print(f"[bark] 信号推送异常（静默跳过）: {e}")
     return df
 
 

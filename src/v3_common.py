@@ -110,19 +110,24 @@ def build_mz_v3(close_m, roe, gpm, me, long_momentum=True, persistence=True):
     return pd.DataFrame(rows).T.sort_index()
 
 
-def industry_cap(sector: str, bench: dict, cap_mult: float, min_cap: float) -> float:
-    """行业权重上限 = max(基准×cap_mult, min_cap)。
-    用户规则：持仓行业权重 ≤ 基准×2；基准<5% 时上限固定 10%。"""
+def industry_cap(sector: str, bench: dict, cap_mult: float = None, min_cap: float = None) -> float:
+    """行业权重上限。规则（用户口径）：基准权重 ≥5% → 上限 = 基准×cap_mult；
+    基准权重 <5% → 上限固定为 min_cap。cap_mult/min_cap 缺省读 config.SECTOR_*。"""
+    if cap_mult is None:
+        cap_mult = config.SECTOR_CAP_MULT
+    if min_cap is None:
+        min_cap = config.SECTOR_MIN_CAP
     b = bench.get(sector, 0.0)
-    return max(b * cap_mult, min_cap)
+    return b * cap_mult if b >= 0.05 else min_cap
 
 
 def apply_sector_neutral(weights: dict, sector_of: dict, bench: dict,
-                         cap_mult: float = 2.0, min_cap: float = 0.10,
+                         cap_mult: float = None, min_cap: float = None,
                          max_iter: int = 10) -> dict:
     """对目标持仓权重做行业中性化约束（迭代收敛，返回调整后 {code: weight}）。
 
-    规则：任一行业持仓权重 ≤ industry_cap(行业) = max(基准×cap_mult, min_cap)。
+    规则：任一行业持仓权重 ≤ industry_cap(行业)（基准≥5% → 基准×cap_mult；<5% → min_cap）。
+    cap_mult/min_cap 缺省读 config.SECTOR_CAP_MULT / SECTOR_MIN_CAP。
     每轮：超限行业内部等比例缩至上限，释放权重按**行业剩余空间**（cap−当前）比例
     分配给未超限行业（行业内按个股权重等比例，单行业分配额 ≤ 其剩余空间，保证不
     制造新超限）；无剩余空间的部分转现金（总权重 ≤ 原总和）。最多 max_iter 轮；
@@ -132,7 +137,7 @@ def apply_sector_neutral(weights: dict, sector_of: dict, bench: dict,
     w = {c: max(0.0, wt) for c, wt in weights.items() if wt > 0}
 
     def _cap(s):
-        return max(bench.get(s, 0.0) * cap_mult, min_cap)
+        return industry_cap(s, bench, cap_mult, min_cap)
 
     for _ in range(max_iter):
         ind_w = {}

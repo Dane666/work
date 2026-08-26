@@ -83,13 +83,16 @@ def push_to_bark(title: str, body: str, key: str = None) -> bool:
         if len(url) <= MAX_GET_URL:
             r = requests.get(url, timeout=10)
             if r.status_code == 200:
+                print(f"[bark] 推送成功: {title}")
                 return True
             # 非 200：回退 POST /push（Bark 官方推荐方式，避免 GET 超长）
             print(f"[bark] GET 返回 {r.status_code}，回退 POST")
             payload = {"device_key": k, "title": title, "body": body, "group": GROUP}
             r2 = requests.post(BARK_POST_URL, json=payload, timeout=10)
             ok = r2.status_code == 200
-            if not ok:
+            if ok:
+                print(f"[bark] 推送成功: {title}")
+            else:
                 print(f"[bark] 推送失败 (HTTP {r2.status_code}): {r2.text[:200]}")
             return ok
 
@@ -97,7 +100,9 @@ def push_to_bark(title: str, body: str, key: str = None) -> bool:
         payload = {"device_key": k, "title": title, "body": body, "group": GROUP}
         r3 = requests.post(BARK_POST_URL, json=payload, timeout=10)
         ok = r3.status_code == 200
-        if not ok:
+        if ok:
+            print(f"[bark] 推送成功: {title}")
+        else:
             print(f"[bark] 推送失败 (HTTP {r3.status_code}): {r3.text[:200]}")
         return ok
     except Exception as e:

@@ -135,8 +135,8 @@ ANALYST_WEEKLY_SLIPPAGE_UPLIFT = 1.50 # 模块3：周频滑点上浮倍数（0.1
 #   （市值 = 注册资金×1e4×收盘价，industry_benchmark.parquet）。
 #   超额部分等比例分配到未超限行业持仓，最多迭代 SECTOR_MAX_ITER 轮；权重归零移除。
 ENABLE_SECTOR_NEUTRAL = True
-SECTOR_CAP_MULT = 2.0            # 行业上限 = 基准权重 × 2
-SECTOR_MIN_CAP = 0.10            # 基准权重 < 5% 时上限固定 10%
+SECTOR_CAP_MULT = 1.0            # 行业上限 = 基准权重 × 1.0（边界扫描最优：0.76/-19.5%/1.23 达标）
+SECTOR_MIN_CAP = 0.07            # 基准权重 < 5% 时上限固定 7%
 SECTOR_MAX_ITER = 10             # 循环调整最大迭代次数
 SECTOR_IND_MAP = DATA_DIR / "industry_map.parquet"
 SECTOR_IND_BENCH = DATA_DIR / "industry_benchmark.parquet"

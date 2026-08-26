@@ -360,6 +360,17 @@ def _compute_v81_mb_targets(panels: dict, as_of: pd.Timestamp) -> dict:
         targets = acc
         factor_label = "mb_v3_combo(V8+Trend+Breakout)"
 
+    # V3.1 方向2：行业中性化（与回测 run_full 一致，config.ENABLE_SECTOR_NEUTRAL 控制）
+    if getattr(config, "ENABLE_SECTOR_NEUTRAL", False):
+        from v3_common import load_sector_data, apply_sector_neutral
+        sector_map, bench = load_sector_data()
+        if sector_map is not None and bench is not None:
+            b = bench.loc[last_me].to_dict() if last_me in bench.index else {}
+            targets = apply_sector_neutral(targets, sector_map, b)
+            targets = {c: w for c, w in targets.items() if w > 1e-12}
+            print(f"  [V3] 行业中性化已叠加（mult={config.SECTOR_CAP_MULT}, "
+                  f"min_cap={config.SECTOR_MIN_CAP:.0%}）目标={len(targets)}")
+
     print(f"  [V3] 截面={last_me.date()} 分段={segment} 目标持仓={len(targets)} "
           f"regime_weight={tw_last:.2f}")
     return dict(last_me=last_me, targets=targets, segment=segment, tw_last=tw_last,

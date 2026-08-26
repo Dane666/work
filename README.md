@@ -159,7 +159,7 @@ docker run --rm \
 
 ### 2. 配置方式（三选一）
 
-**A. GitHub Actions（推荐云端）**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，新增 `BARK_KEY`，值为你的 Bark Key。工作流已为 `signal_generator.py` / `sim_tracker.py` 注入 `env: BARK_KEY: ${{ secrets.BARK_KEY }}`，无需改 workflow。未配置时脚本自动跳过推送，主流程不受影响。
+**A. GitHub Actions（推荐云端）**：仓库 **Settings → Secrets and variables → Actions → New repository secret**，新增 `BARK_KEY`，值为你的 Bark Key。工作流已为 `signal_generator.py` / `sim_tracker.py` 注入 `env: BARK_KEY: ${{ secrets.BARK_KEY }}`（并同时注入旧 secret `BARK_DEVICE_KEY` 兜底，**两者配置其一即可**），无需改 workflow。未配置时脚本自动跳过推送，主流程不受影响。
 
 **B. 本地/云服务器**：直接 export 后运行 `scripts/run_daily.sh`（脚本已透传该变量）：
 ```bash

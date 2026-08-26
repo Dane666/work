@@ -84,6 +84,7 @@ jobs:
       - name: Run signal generator (V8.1 / 主板版V3)
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}   # 兼容旧 secret（未配 BARK_KEY 时兜底）
         run: |
           cd src
           # GitHub Actions 无法访问 akshare 中国源，故不加 --live
@@ -95,6 +96,7 @@ jobs:
       - name: Run sim tracker
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
+          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}   # 兼容旧 secret（未配 BARK_KEY 时兜底）
         run: |
           cd src
           python sim_tracker.py

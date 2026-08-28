@@ -90,8 +90,11 @@ jobs:
         run: |
           mkdir -p data/state output/signals
           git fetch origin data 2>/dev/null || true
+          # 注意：git checkout <ref> -- <path> 会同时放入工作区与索引；
+          # 为避免后续「Commit & push docs」将 state/signals 误提交进 main，立即从索引移除（保留工作区文件）。
           git checkout origin/data -- data/state/ 2>/dev/null || echo "No existing sim state found, starting fresh"
           git checkout origin/data -- data/signals/ 2>/dev/null || echo "No existing signals found, starting fresh"
+          git reset -q HEAD data/state data/signals 2>/dev/null || true
           # signal_generator 读取 output/signals/，将持久化历史信号同步过去
           [ -d data/signals ] && cp -r data/signals/. output/signals/ 2>/dev/null || true
           echo "=== 恢复后的 data/state ==="

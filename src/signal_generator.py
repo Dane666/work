@@ -406,11 +406,12 @@ def load_prev_holdings(signal_dir: str, as_of: pd.Timestamp) -> list:
     if not os.path.isdir(p):
         return []
     files = sorted(f for f in os.listdir(p) if f.endswith("_signal.csv"))
-    prev = None
-    for f in files:
-        d = pd.Timestamp(f.replace("_signal.csv", ""))
-        if d < as_of:
-            prev = f
+    # 优先严格早于 as_of 的最近一份（常规每日推进场景）；
+    # 否则回退到最近一份（支持同日期重跑 / 云端无"前一交易日"信号的场景，
+    # 使 HOLD 占比正确涌现，避免每次都全 BUY）。
+    earlier = [f for f in files
+               if pd.Timestamp(f.replace("_signal.csv", "")) < as_of]
+    prev = earlier[-1] if earlier else (files[-1] if files else None)
     if prev is None:
         return []
     df = pd.read_csv(os.path.join(p, prev))

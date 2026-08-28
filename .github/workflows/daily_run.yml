@@ -119,7 +119,8 @@ jobs:
           python sim_tracker.py --offline
 
       # ---- 状态保存：将更新后的 sim 状态与历史信号推送回 data 分支（跨运行持久化）----
-      # 用独立克隆推送到 data 分支，避免污染 main（data/ 在 main 被 .gitignore 忽略）。
+      # 关键：完整克隆 data 分支（不使用 --filter/sparse-checkout），确保提交时保留全部
+      # 既有面板文件；否则 blobless+sparse 克隆会因未检出的文件不在索引中而被部分提交丢弃。
       - name: Persist sim state to data branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -129,17 +130,14 @@ jobs:
             echo "无 sim state / 信号需持久化，跳过"
             exit 0
           fi
-          rm -rf /tmp/sim_state_push && mkdir -p /tmp/sim_state_push/state /tmp/sim_state_push/signals
-          [ -d data/state ] && cp -r data/state/. /tmp/sim_state_push/state/ 2>/dev/null || true
-          [ -d output/signals ] && cp -r output/signals/. /tmp/sim_state_push/signals/ 2>/dev/null || true
+          WS="$GITHUB_WORKSPACE"
           rm -rf /tmp/data_repo
-          git clone --filter=blob:none --no-checkout --branch data --single-branch \
-            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" /tmp/data_repo
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" /tmp/data_repo
           cd /tmp/data_repo
-          git sparse-checkout set data/state data/signals
-          git checkout data -- data/state data/signals 2>/dev/null || mkdir -p data/state data/signals
-          cp -r /tmp/sim_state_push/state/. data/state/ 2>/dev/null || true
-          cp -r /tmp/sim_state_push/signals/. data/signals/ 2>/dev/null || true
+          git checkout -B data origin/data
+          mkdir -p data/state data/signals
+          [ -d "$WS/data/state" ] && cp -r "$WS/data/state/." data/state/ 2>/dev/null || true
+          [ -d "$WS/output/signals" ] && cp -r "$WS/output/signals/." data/signals/ 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f data/state data/signals 2>/dev/null || true

@@ -17,6 +17,11 @@ FIN_DIR = DATA_DIR / "fin"                                # 个股财报缓存�
 OUTPUT_DIR = BASE_DIR / "output"                          # 报告与中间产物输出目录
 DOCS_DIR = BASE_DIR / "docs"                              # GitHub Pages 部署目录（dashboard）
 
+# 模拟盘状态持久化目录（跨运行共享）：随 data 分支持久化，
+# 使 Actions（美国 runner 全新 checkout）能恢复上一日持仓、净值历史，
+# 与本地的持续模拟盘保持一致。sim_tracker.py 优先从此目录读写状态。
+SIM_STATE_DIR = DATA_DIR / "state"
+
 # ----------------------------------------------------------------------------
 # V8.1 Dashboard（持仓走势图）数据源
 # ----------------------------------------------------------------------------

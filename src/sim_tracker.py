@@ -83,6 +83,11 @@ def fetch_day_prices(codes, date: pd.Timestamp) -> dict:
     失败重试 retries 次（间隔 0.4s），确保批量 88 只时覆盖完整。
     """
     import time
+    import socket
+    # 防御：Actions 美国 runner 无法稳定连接中国行情源时，akshare 底层请求可能无限挂起
+    # （无超时）。这里设置全局 socket 超时，使其快速失败而非阻塞整条流水线。
+    _prev_to = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(8)
     try:
         import akshare as ak
         out = {}
@@ -121,6 +126,8 @@ def fetch_day_prices(codes, date: pd.Timestamp) -> dict:
     except Exception as e:
         print(f"[{datetime.now()}] 行情获取失败（{e}），本次仅记录挂起状态。")
         return {}
+    finally:
+        socket.setdefaulttimeout(_prev_to)
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +370,8 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
 def main():
     ap = argparse.ArgumentParser(description="V7.1 模拟盘净值跟踪器")
     ap.add_argument("--init", action="store_true", help="初始化（记录开盘前状态）")
+    ap.add_argument("--offline", action="store_true",
+                    help="离线模式：跳过实时行情拉取（Actions 无中国源），直接挂起待成交")
     ap.add_argument("--date", type=str, default=None, help="执行日（默认=今日）")
     ap.add_argument("--signal-date", type=str, default=None,
                     help="指定读取的信号文件日期（默认=执行日之前最近一份）")
@@ -409,9 +418,9 @@ def main():
     amount = pd.read_parquet(config.DATA_DIR / "v6_amount_panel.parquet")
     slip_map, _ = build_slippage_map(amount)
 
-    # 试图获取执行日价格
+    # 试图获取执行日价格（离线模式 / 初始化均不拉取实时行情）
     codes_all = list(sig_df["code"].astype(str))
-    prices = fetch_day_prices(codes_all, as_of) if not args.init else {}
+    prices = fetch_day_prices(codes_all, as_of) if (not args.init and not args.offline) else {}
 
     if not prices:
         # 无可成交行情（初始化 / 离线）：记录挂起状态，不实际建仓

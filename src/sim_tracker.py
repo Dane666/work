@@ -24,8 +24,9 @@ V8.1 升级（2026-08-19）：BUY 建仓按信号 CSV 的 target_weight 列分�
     列: date, nav, cash, position_value, benchmark_nav,
         daily_return, cum_return, tracking_error(滚动20日 vs CSI300)
 
-状态：
-  output/sim_nav/sim_state.json  —— 跨日持仓 / 现金 / 待成交单（保证每日增量正确）。
+状态（跨运行持久化于 data/state/，随 data 分支持久化；output/sim_nav/ 仅本地缓存）：
+  data/state/sim_state.json  —— 跨日持仓 / 现金 / 待成交单（保证每日增量正确）。
+  data/state/sim_nav_history.csv —— 净值历史（逐日 NAV 序列，供 Pages 连续展示）。
 
 用法：
   cd src
@@ -56,9 +57,13 @@ from stress_test_v6 import build_slippage_map
 from push_utils import push_to_bark, format_stock_list, format_percent
 
 
-NAV_DIR = config.OUTPUT_DIR / "sim_nav"
+NAV_DIR = config.OUTPUT_DIR / "sim_nav"          # 本地缓存目录（供本地查看明细，output/ 被 gitignore）
 SIGNAL_DIR = config.OUTPUT_DIR / "signals"
-STATE_FILE = NAV_DIR / "sim_state.json"
+# 跨运行持久化目录：data/state（随 data 分支持久化），使 Actions 全新 checkout 也能
+# 恢复上一日持仓 / 现金 / 净值历史，与本地持续模拟盘保持一致。
+STATE_DIR = config.SIM_STATE_DIR
+STATE_FILE = STATE_DIR / "sim_state.json"
+NAV_HIST_FILE = STATE_DIR / "sim_nav_history.csv"   # 净值历史持久化路径（原 output/sim_nav/sim_nav_history.csv）
 
 # 锁定滑点模型（与 V7.1 完全一致）
 FIXED_WEIGHT = config.FIXED_WEIGHT          # 0.10
@@ -122,6 +127,7 @@ def fetch_day_prices(codes, date: pd.Timestamp) -> dict:
 # 状态读写
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     if not STATE_FILE.exists():
         return _empty_state()
     st = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -180,7 +186,8 @@ def _apply_start_date(st: dict) -> None:
 
 def _truncate_nav_history(start_ts) -> None:
     """删除 sim_nav_history.csv 中早于 start_ts 的记录（保留其余）。"""
-    p = NAV_DIR / "sim_nav_history.csv"
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    p = NAV_HIST_FILE
     if not p.exists():
         return
     df = pd.read_csv(p)
@@ -194,7 +201,8 @@ def _truncate_nav_history(start_ts) -> None:
 
 def _reset_nav_history() -> None:
     """完全重置：清空净值历史（从起始日起重建）。"""
-    p = NAV_DIR / "sim_nav_history.csv"
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    p = NAV_HIST_FILE
     if p.exists():
         p.unlink()
         print("[sim_tracker] nav_history 已清空（模拟盘从起始日重建净值曲线）")
@@ -230,9 +238,14 @@ def _ensure_start_nav(as_of: pd.Timestamp, state: dict) -> None:
 
 
 def save_state(st):
-    NAV_DIR.mkdir(parents=True, exist_ok=True)
+    # 主持久化位置：data/state/（随 data 分支持久化，跨 Actions 运行共享）
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=2),
                           encoding="utf-8")
+    # 同步缓存到 output/sim_nav/，便于本地查看（不影响持久化逻辑；output/ 被 gitignore）
+    NAV_DIR.mkdir(parents=True, exist_ok=True)
+    (NAV_DIR / "sim_state.json").write_text(
+        json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +383,7 @@ def main():
     if not sig_files:
         print(f"[{datetime.now()}] 无信号文件，请先运行 signal_generator.py")
         _ensure_start_nav(as_of, state)     # 起始日模式：补记空仓起点 NAV
+        save_state(state)                   # 确保 data/state/sim_state.json 初始化落地
         return
     if args.signal_date:
         sig_name = f"{args.signal_date}_signal.csv"
@@ -497,7 +511,7 @@ def main():
 
 
 def _read_nav() -> pd.DataFrame:
-    p = NAV_DIR / "sim_nav_history.csv"
+    p = NAV_HIST_FILE
     if p.exists():
         return pd.read_csv(p)
     return pd.DataFrame(columns=["date", "nav", "cash", "position_value",
@@ -506,17 +520,20 @@ def _read_nav() -> pd.DataFrame:
 
 
 def _append_nav(row: dict):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     hist = _read_nav()
     # 同日期覆盖
     hist = hist[hist["date"] != row["date"]]
     hist = pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
     hist = hist.sort_values("date").reset_index(drop=True)
+    hist.to_csv(NAV_HIST_FILE, index=False, encoding="utf-8")
+    # 同步缓存到 output/sim_nav/，便于本地查看
     NAV_DIR.mkdir(parents=True, exist_ok=True)
     hist.to_csv(NAV_DIR / "sim_nav_history.csv", index=False, encoding="utf-8")
     # 同时输出按日的明细文件（用户要求的 YYYY-MM-DD_nav.csv）
     pd.DataFrame([row]).to_csv(
         NAV_DIR / f"{row['date']}_nav.csv", index=False, encoding="utf-8")
-    print(f"[{datetime.now()}] NAV 已记录: {NAV_DIR / (row['date'] + '_nav.csv')}")
+    print(f"[{datetime.now()}] NAV 已记录: {NAV_HIST_FILE}")
 
 
 def _rolling_tracking_error(nav_hist: pd.DataFrame, bench: pd.Series,

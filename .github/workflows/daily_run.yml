@@ -92,12 +92,53 @@ jobs:
           # config.USE_MAINBOARD=True → 主板版 V3 链路（收窄池+质量过滤+长动量+股息率门控）。
           python signal_generator.py
 
+      # ---- 状态恢复：从 data 分支载入上一日 sim 状态（持仓/现金/净值历史）----
+      # data/ 已由「Stage data into workspace」从 data 分支载入；此处显式恢复 data/state/
+      # 作为兜底，确保 Actions 全新 checkout 也能基于上一日持仓继续（跨运行连续）。
+      - name: Restore sim state from data branch
+        run: |
+          mkdir -p data/state
+          git fetch origin data 2>/dev/null || true
+          git checkout origin/data -- data/state/ 2>/dev/null || echo "No existing sim state found, starting fresh"
+          echo "=== 恢复后的 data/state ==="
+          ls -la data/state/ 2>/dev/null || echo "(data/state 为空)"
+
       - name: Run sim tracker
         env:
           BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
         run: |
           cd src
           python sim_tracker.py
+
+      # ---- 状态保存：将更新后的 sim 状态推送回 data 分支（跨运行持久化）----
+      # 用独立克隆推送到 data 分支，避免污染 main（data/ 在 main 被 .gitignore 忽略）。
+      - name: Persist sim state to data branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -d data/state ] || [ -z "$(ls -A data/state 2>/dev/null)" ]; then
+            echo "无 sim state 需持久化，跳过"
+            exit 0
+          fi
+          rm -rf /tmp/sim_state_push && mkdir -p /tmp/sim_state_push
+          cp -r data/state/. /tmp/sim_state_push/
+          rm -rf /tmp/data_repo
+          git clone --filter=blob:none --no-checkout --branch data --single-branch \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" /tmp/data_repo
+          cd /tmp/data_repo
+          git sparse-checkout set data/state
+          git checkout data -- data/state 2>/dev/null || mkdir -p data/state
+          cp -r /tmp/sim_state_push/. data/state/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f data/state/ 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "sim state 无变化，跳过提交"
+          else
+            git commit -m "chore(state): update sim state $(date '+%Y-%m-%d')"
+            git push
+            echo "sim state 已推送到 data 分支"
+          fi
 
       # V8.1 dashboard：持仓走势图 + GitHub Pages 部署
       # Actions 上跑默认 offline（仅用 data 分支面板，无中国源拉取不了 akshare），

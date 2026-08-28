@@ -81,21 +81,11 @@ jobs:
           if [ "$missing" -ne 0 ]; then exit 1; fi
           echo "数据完整性校验通过"
 
-      - name: Run signal generator (V8.1 / 主板版V3)
-        env:
-          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
-        run: |
-          cd src
-          # GitHub Actions 无法访问 akshare 中国源，故不加 --live
-          # （--live 会逐只股票请求实时行情并因超时卡死数小时）；
-          # 实时刷新请在本机/云服务器执行。Actions 直接用 data 分支面板生成信号。
-          # config.USE_MAINBOARD=True → 主板版 V3 链路（收窄池+质量过滤+长动量+股息率门控）。
-          python signal_generator.py
-
       # ---- 状态恢复：从 data 分支载入上一日 sim 状态（持仓/现金/净值历史）与历史信号 ----
+      # 必须位于 signal_generator 之前：signal_generator 需要历史信号来计算 HOLD/BUY/SELL 增量。
       # data/ 已由「Stage data into workspace」从 data 分支载入；此处显式恢复 data/state/
-      # 与 data/signals/ 作为兜底，确保 Actions 全新 checkout 也能基于上一日状态继续
-      # （跨运行连续；历史信号用于 signal_generator 计算 HOLD/BUY/SELL 增量）。
+      # 与 data/signals/ 作为兜底，并确保历史信号进入 output/signals/（signal_generator 读取路径），
+      # 使 Actions 全新 checkout 也能基于上一日状态继续（跨运行连续）。
       - name: Restore sim state from data branch
         run: |
           mkdir -p data/state output/signals
@@ -108,6 +98,17 @@ jobs:
           ls -la data/state/ 2>/dev/null || echo "(data/state 为空)"
           echo "=== 恢复后的 output/signals ==="
           ls -la output/signals/ 2>/dev/null || echo "(output/signals 为空)"
+
+      - name: Run signal generator (V8.1 / 主板版V3)
+        env:
+          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
+        run: |
+          cd src
+          # GitHub Actions 无法访问 akshare 中国源，故不加 --live
+          # （--live 会逐只股票请求实时行情并因超时卡死数小时）；
+          # 实时刷新请在本机/云服务器执行。Actions 直接用 data 分支面板生成信号。
+          # config.USE_MAINBOARD=True → 主板版 V3 链路（收窄池+质量过滤+长动量+股息率门控）。
+          python signal_generator.py
 
       - name: Run sim tracker
         env:

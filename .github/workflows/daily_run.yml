@@ -122,6 +122,17 @@ jobs:
           # （fetch_day_prices 已加 socket 超时作为兜底），直接记录挂起状态并持久化。
           python sim_tracker.py --offline
 
+      # ---- 方向E：持仓监控预警（收盘净值更新后扫描持仓，触发卖出条件则预警；仅提示不自动卖出）----
+      # 数据来源：data/state/sim_state.json（上方 Restore 已恢复）+ data/mainboard_close_panel.parquet（Stage 已载入）。
+      # Actions 上未设置 LIVE_MODE（默认 false 不推送）→ 显式加 --push：无论空仓或有预警都推送
+      # （空仓推「✅ 持仓健康」，有预警推触发清单），保证每日收到持仓健康度报告。
+      - name: Run position monitor (持仓监控预警)
+        env:
+          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
+        run: |
+          cd src
+          python monitor.py --push
+
       # ---- 状态保存：将更新后的 sim 状态与历史信号推送回 data 分支（跨运行持久化）----
       # 关键：完整克隆 data 分支（不使用 --filter/sparse-checkout），确保提交时保留全部
       # 既有面板文件；否则 blobless+sparse 克隆会因未检出的文件不在索引中而被部分提交丢弃。

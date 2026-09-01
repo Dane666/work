@@ -14,3 +14,5 @@ logs/
 *.log
 # 系统
 .DS_Store
+# 敏感配置（Bark key / 券商凭据等，严禁入库）
+.env

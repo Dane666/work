@@ -9,12 +9,18 @@ generate_dashboard.py — V8.1 模拟盘持仓走势图 + GitHub Pages 总览生
                                        买入点绿色箭头）
   - docs/assets/nav_curve.png          模拟盘 vs 沪深300 净值曲线
   - docs/assets/pnl_bar.png            持仓盈亏柱状图（A股惯例：红涨绿跌）
-  - docs/index.html                    总览页（概览卡片 + 净值曲线 + 盈亏柱 + 持仓表格）
+  - docs/assets/industry_exposure.png  行业暴露：持仓 vs 基准（方向B增强，chart_utils）
+  - docs/assets/factor_exposure.png    四因子暴露（动量/价值/质量/小市值，方向B增强）
+  - docs/assets/drawdown_attr.png      净值回撤归因（>5% 区间行业贡献，方向B增强）
+  - docs/index.html                    总览页（概览卡片 + 净值曲线 + 盈亏柱 + 增强图 + 持仓表格）
   - docs/holdings.html                 详情页（全部持仓股票图表网格）
 
 数据来源：
-  - 持仓：      output/sim_nav/sim_state.json（code -> shares/cost）
-  - 净值：      output/sim_nav/sim_nav_history.csv
+  - 持仓：      data/state/sim_state.json（优先；回退 output/sim_nav/sim_state.json）
+  - 净值：      data/state/sim_nav_history.csv（优先；回退 output/sim_nav/ 缓存）
+  - 行业/因子： data/industry_map.parquet / industry_benchmark.parquet /
+                roe_panel_mainboard.parquet / gpm_yoy_panel_mainboard.parquet /
+                div_yield_panel_mainboard.parquet / industry_capital.parquet
   - 买入日期：  output/signals/*_signal.csv（BUY 信号日；执行日=其后第一个交易日）
   - K 线：      data/v8_ohlcv.pkl（缺省回退 data/_v8_ohlcv_ckpt.pkl，{code: DataFrame(index=date,
                 open/high/low/close)}，前复权与 akshare qfq 对齐）
@@ -61,8 +67,12 @@ DOCS_DIR = config.DOCS_DIR
 CHARTS_DIR = DOCS_DIR / "assets" / "charts"
 NAV_DIR = config.OUTPUT_DIR / "sim_nav"
 SIGNAL_DIR = config.OUTPUT_DIR / "signals"
-STATE_FILE = NAV_DIR / "sim_state.json"
-NAV_HIST_FILE = NAV_DIR / "sim_nav_history.csv"
+# 状态优先读持久化主路径 data/state/（跨运行共享，与 sim_tracker 一致）；
+# 缺失时回退本地缓存 output/sim_nav/（旧路径产物）。
+STATE_FILE = config.SIM_STATE_DIR / "sim_state.json"
+STATE_FILE_CACHE = NAV_DIR / "sim_state.json"
+NAV_HIST_FILE = config.SIM_STATE_DIR / "sim_nav_history.csv"
+NAV_HIST_FILE_CACHE = NAV_DIR / "sim_nav_history.csv"
 
 # 图表窗口（交易日）
 DEFAULT_LAST_DAYS = 120
@@ -142,16 +152,24 @@ def load_ohlcv() -> dict:
 
 
 def load_state() -> dict:
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    for p in (STATE_FILE, STATE_FILE_CACHE):
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                continue
     return {}
 
 
 def load_nav_history() -> pd.DataFrame:
-    if NAV_HIST_FILE.exists():
-        df = pd.read_csv(NAV_HIST_FILE)
-        df["date"] = pd.to_datetime(df["date"])
-        return df
+    for p in (NAV_HIST_FILE, NAV_HIST_FILE_CACHE):
+        if p.exists():
+            try:
+                df = pd.read_csv(p)
+                df["date"] = pd.to_datetime(df["date"])
+                return df
+            except Exception:
+                continue
     return pd.DataFrame()
 
 
@@ -385,6 +403,19 @@ def build_index_html(ctx: dict) -> str:
     total_pnl = sum(r["pnl_amt"] for r in rows)
     gainers = sum(1 for r in rows if r["pnl_pct"] >= 0)
     o = ctx["overview"]
+    enh = ctx.get("enh", {})
+
+    def _blk(key: str, title: str, img: str, alt: str) -> str:
+        return "" if not enh.get(key) else (
+            f'<div class="chart-block">\n    <h2>{title}</h2>\n'
+            f'    <img src="{img}" alt="{alt}">\n  </div>')
+
+    ind_block = _blk("industry", "行业暴露（持仓 vs 基准）",
+                     "assets/industry_exposure.png", "industry exposure")
+    fac_block = _blk("factor", "因子暴露分解（动量 / 价值 / 质量 / 小市值）",
+                     "assets/factor_exposure.png", "factor exposure")
+    dd_block = _blk("drawdown", "净值回撤归因（>5% 回撤区间，行业贡献）",
+                    "assets/drawdown_attr.png", "drawdown attribution")
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -451,6 +482,12 @@ def build_index_html(ctx: dict) -> str:
     <h2>持仓盈亏（最新价 vs 成本）</h2>
     <img src="assets/pnl_bar.png" alt="pnl bar">
   </div>
+
+  {ind_block}
+
+  {fac_block}
+
+  {dd_block}
 
   <div class="chart-block">
     <h2>持仓明细（{len(rows)} 只）</h2>
@@ -623,6 +660,29 @@ def main():
                  DOCS_DIR / "assets" / "pnl_bar.png")
     print("✓ 生成净值曲线与盈亏柱状图 → docs/assets/")
 
+    # ---- 方向B：仪表盘增强（行业暴露 / 因子暴露 / 回撤归因）----
+    import chart_utils
+    industry_map = None
+    _p = config.DATA_DIR / "industry_map.parquet"
+    if _p.exists():
+        industry_map = pd.read_parquet(_p)
+    bench_df = None
+    _p = config.DATA_DIR / "industry_benchmark.parquet"
+    if _p.exists():
+        bench_df = pd.read_parquet(_p)
+    enh = {
+        "industry": chart_utils.plot_industry_exposure(
+            positions, industry_map, bench_df,
+            DOCS_DIR / "assets" / "industry_exposure.png"),
+        "factor": chart_utils.plot_factor_exposure(
+            positions, DOCS_DIR / "assets" / "factor_exposure.png"),
+        "drawdown": chart_utils.plot_drawdown_attribution(
+            hist, positions, industry_map,
+            DOCS_DIR / "assets" / "drawdown_attr.png"),
+    }
+    print("✓ 仪表盘增强图：行业暴露={} 因子暴露={} 回撤归因={}".format(
+        enh["industry"], enh["factor"], enh["drawdown"]))
+
     # ---- 概览 & 页面 ----
     bench = float(hist["benchmark_nav"].iloc[-1]) if (
         len(hist) and "benchmark_nav" in hist.columns and
@@ -641,6 +701,7 @@ def main():
         "overview": overview,
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "data_as_of": data_as_of.strftime("%Y-%m-%d"),
+        "enh": enh,
     }
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     (DOCS_DIR / "index.html").write_text(build_index_html(ctx), encoding="utf-8")

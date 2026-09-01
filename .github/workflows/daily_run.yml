@@ -102,6 +102,18 @@ jobs:
           echo "=== 恢复后的 output/signals ==="
           ls -la output/signals/ 2>/dev/null || echo "(output/signals 为空)"
 
+      # ---- 数据同步：每次运行先增量拉取最新收盘行情（新浪源），确保信号/监控基于最新面板 ----
+      # 背景：面板曾停更于 2026-08-24。Actions cron = 北京次日 00:00（已收盘），
+      # 此时拉取能拿到当日完整数据 → 信号/监控/净值全部基于最新行情，
+      # 且 Persist 阶段会把更新后的面板推回 data 分支（下次运行即用新基准）。
+      # 兜底：美国 runner 若无法访问新浪源，socket 20s 超时快速失败；
+      # `|| echo` 保证流程继续（沿用现有面板），不影响信号/监控。
+      - name: Fetch latest daily panel (增量拉取)
+        timeout-minutes: 45
+        run: |
+          cd src
+          python update_daily_panel.py || echo "::warning::增量拉取失败/超时，本次沿用现有面板继续（下次运行重试）"
+
       - name: Run signal generator (V8.1 / 主板版V3)
         env:
           BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
@@ -133,18 +145,14 @@ jobs:
           cd src
           python monitor.py --push
 
-      # ---- 状态保存：将更新后的 sim 状态与历史信号推送回 data 分支（跨运行持久化）----
+      # ---- 状态保存：将更新后的 sim 状态、历史信号与（可能更新的）面板推送回 data 分支 ----
       # 关键：完整克隆 data 分支（不使用 --filter/sparse-checkout），确保提交时保留全部
       # 既有面板文件；否则 blobless+sparse 克隆会因未检出的文件不在索引中而被部分提交丢弃。
+      # 面板由「Fetch latest daily panel」步骤增量拉取产生；无变化时 diff 检查跳过提交（幂等）。
       - name: Persist sim state to data branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if { [ ! -d data/state ] || [ -z "$(ls -A data/state 2>/dev/null)" ]; } \
-             && { [ ! -d output/signals ] || [ -z "$(ls -A output/signals 2>/dev/null)" ]; }; then
-            echo "无 sim state / 信号需持久化，跳过"
-            exit 0
-          fi
           WS="$GITHUB_WORKSPACE"
           rm -rf /tmp/data_repo
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" /tmp/data_repo
@@ -153,15 +161,17 @@ jobs:
           mkdir -p data/state data/signals
           [ -d "$WS/data/state" ] && cp -r "$WS/data/state/." data/state/ 2>/dev/null || true
           [ -d "$WS/output/signals" ] && cp -r "$WS/output/signals/." data/signals/ 2>/dev/null || true
+          [ -f "$WS/data/mainboard_close_panel.parquet" ] && cp "$WS/data/mainboard_close_panel.parquet" data/ 2>/dev/null || true
+          [ -f "$WS/data/mainboard_amount_panel.parquet" ] && cp "$WS/data/mainboard_amount_panel.parquet" data/ 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f data/state data/signals 2>/dev/null || true
+          git add -f data/state data/signals data/mainboard_close_panel.parquet data/mainboard_amount_panel.parquet 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "sim state / 信号 无变化，跳过提交"
+            echo "sim state / 信号 / 面板 无变化，跳过提交"
           else
-            git commit -m "chore(state): update sim state & signals $(date '+%Y-%m-%d')"
+            git commit -m "chore(state): update sim state, signals & daily panel $(date '+%Y-%m-%d')"
             git push
-            echo "sim state / 信号 已推送到 data 分支"
+            echo "sim state / 信号 / 面板 已推送到 data 分支"
           fi
 
       # V8.1 dashboard：持仓走势图 + GitHub Pages 部署

@@ -54,6 +54,9 @@ if [ "$LIVE_MODE" = "true" ]; then
     # 推送失败/未配置 key 时静默跳过（|| true），不影响已生成的委托单（set -e 保护）。
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 推送委托单摘要（order_push.py）"
     "$PYTHON" order_push.py || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 委托单推送失败（不影响委托单生成）"
+    # 持仓监控预警（方向E）：LIVE_MODE=true 时预警摘要随委托单同时推送；仅提示，不自动执行
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 持仓监控预警（monitor.py）"
+    "$PYTHON" monitor.py || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 持仓监控执行异常（不影响委托单生成）"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 委托单生成完成（券商端执行需人工/SDK）"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] === 实盘模式任务完成 ==="
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] === 实盘模式任务完成 ===" >> "$LOG_FILE"
@@ -62,6 +65,11 @@ fi
 
 # 2) 净值跟踪（读取上一步信号，按次日开盘/当日收盘模拟成交）
 "$PYTHON" sim_tracker.py
+
+# ---- 持仓监控预警（方向E，风控辅助）：收盘净值更新后扫描持仓，触发卖出条件则预警 ----
+# 仅提示不自动执行；LIVE_MODE=false（默认）时仅打印到日志，不推送。
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 持仓监控预警（monitor.py）"
+"$PYTHON" monitor.py || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 持仓监控执行异常（不影响主流程）"
 
 # ==================== 3. 偏离预警检查（B）====================
 # 非零退出码(=1) 表示预警触发；用 || 捕获避免 set -e 直接中断任务。

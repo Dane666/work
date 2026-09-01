@@ -172,3 +172,18 @@ RISK_MAX_TOTAL_POSITION_PCT = 0.90          # 总仓位上限（NAV 占比）
 RISK_MAX_DAILY_LOSS_PCT = -0.05             # 单日 NAV 跌幅熔断阈值（-5% 禁止新开仓）
 RISK_LIVE_MODE = False                       # 实盘模式总开关（默认 false；激活方式见 README "实盘接入指南"）
 RISK_ORDERS_DIR = OUTPUT_DIR / "orders"      # 可执行委托单 CSV 输出目录
+
+# ----------------------------------------------------------------------------
+# 方向E：持仓监控预警阈值（monitor.py，风控辅助工具）
+# ----------------------------------------------------------------------------
+# 仅生成预警提示，不触发任何自动卖出/策略参数变更。监控规则：
+#   - 止损预警   盈亏率 < MONITOR_STOP_LOSS        （亏损超阈值提示止损）
+#   - 止盈预警   盈亏率 > MONITOR_PROFIT_TARGET     （盈利超阈值提示考虑止盈）
+#   - 移动止损   自持仓期间最高价回撤 > MONITOR_TRAILING_STOP（移动止损信号）
+#   - 估值偏高   市盈率 > MONITOR_PE_RATIO          （需 PE 面板，缺失自动跳过）
+MONITOR_STOP_LOSS = -0.08          # 亏损超过 8% 时预警
+MONITOR_PROFIT_TARGET = 0.20       # 盈利超过 20% 时预警（提示考虑止盈）
+MONITOR_TRAILING_STOP = 0.06       # 从最高点回撤超过 6% 时预警（移动止损信号）
+MONITOR_PE_RATIO = 50              # 市盈率超过 50 倍时预警（估值偏高）
+MONITOR_PE_PANEL = DATA_DIR / "pe_panel_mainboard.parquet"  # PE 面板（当前仓库无此文件 → 估值预警自动跳过）
+MONITOR_MAX_DISPLAY = 10           # Bark 推送最多显示前 N 只

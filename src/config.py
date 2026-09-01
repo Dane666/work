@@ -157,3 +157,18 @@ EXECUTION_PRICE = "next_open"
 #   日均成交额 > 5亿元 → 0.05% | 1-5亿元 → 0.15% | < 1亿元 → 0.30%
 IMPACT_TIERS = [(5.0e8, 0.0005), (1.0e8, 0.0015), (0.0, 0.0030)]
 ENABLE_IMPACT_COST = True
+
+# ----------------------------------------------------------------------------
+# 方向C：实盘风控参数（保守默认值；激活 LIVE_MODE 前须复核券商账户约束后调整）
+# ----------------------------------------------------------------------------
+# 风控层级（保守起点，单只 10% / 总仓位 90% / 单日累计买入 10 万 / 单日跌幅 -5% 熔断）：
+#   - 单只持仓上限 MAX_SINGLE_POSITION_PCT：单只股票市值占 NAV 比例，硬性截断
+#   - 总仓位上限   MAX_TOTAL_POSITION_PCT ：Σ(持仓+新买入) ≤ 该比例，留 10% 现金应急
+#   - 单日买入上限 MAX_DAILY_BUY_AMOUNT   ：累计买入金额（含滑点/冲击）≤ 该金额
+#   - 单日跌幅熔断 MAX_DAILY_LOSS_PCT    ：日 NAV 跌幅低于该阈值，禁止新开仓，仅允许 SELL
+RISK_MAX_DAILY_BUY_AMOUNT = 100_000.0      # 单日累计买入上限（元）
+RISK_MAX_SINGLE_POSITION_PCT = 0.10         # 单只持仓上限（NAV 占比）
+RISK_MAX_TOTAL_POSITION_PCT = 0.90          # 总仓位上限（NAV 占比）
+RISK_MAX_DAILY_LOSS_PCT = -0.05             # 单日 NAV 跌幅熔断阈值（-5% 禁止新开仓）
+RISK_LIVE_MODE = False                       # 实盘模式总开关（默认 false；激活方式见 README "实盘接入指南"）
+RISK_ORDERS_DIR = OUTPUT_DIR / "orders"      # 可执行委托单 CSV 输出目录

@@ -372,6 +372,9 @@ def main():
     ap.add_argument("--init", action="store_true", help="初始化（记录开盘前状态）")
     ap.add_argument("--offline", action="store_true",
                     help="离线模式：跳过实时行情拉取（Actions 无中国源），直接挂起待成交")
+    ap.add_argument("--live", action="store_true",
+                    help="实盘模式：读取最新信号 + sim_state + 行情，调 risk_manager 生成可执行委托单 CSV"
+                         "（不实际成交、不修改 sim_state；券商端执行由人工/SDK 完成）")
     ap.add_argument("--date", type=str, default=None, help="执行日（默认=今日）")
     ap.add_argument("--signal-date", type=str, default=None,
                     help="指定读取的信号文件日期（默认=执行日之前最近一份）")
@@ -421,6 +424,32 @@ def main():
     # 试图获取执行日价格（离线模式 / 初始化均不拉取实时行情）
     codes_all = list(sig_df["code"].astype(str))
     prices = fetch_day_prices(codes_all, as_of) if (not args.init and not args.offline) else {}
+
+    # ---- 实盘模式（方向C）：仅生成委托单，不修改 sim_state、不实际成交 ----
+    if args.live:
+        import risk_manager as _risk
+        if not prices:
+            print(f"[sim_tracker] --live 但 fetch_day_prices 返回空（无当日行情），"
+                  f"跳过生成委托单")
+            return
+        nav = float(state.get("nav", 1.0))
+        # 同步当日收益率用于熔断（来自净值历史末行）
+        try:
+            hist = _read_nav()
+            if len(hist) and "daily_return" in hist.columns:
+                state["daily_return"] = float(hist["daily_return"].iloc[-1])
+        except Exception:
+            pass
+        orders = _risk.build_orders(sig_df, state, prices, as_of,
+                               nav=nav, nav_unit=config.INIT_CAPITAL)
+        out = _risk.write_orders(orders, as_of)
+        n_buy = int((orders["direction"] == "BUY").sum()) if len(orders) else 0
+        n_sell = int((orders["direction"] == "SELL").sum()) if len(orders) else 0
+        total_amt = float(orders["amount"].sum()) if len(orders) else 0.0
+        print(f"[sim_tracker] --live 委托单：BUY={n_buy}  SELL={n_sell}  "
+              f"金额合计={total_amt:,.0f} 元  NAV={nav:.4f}")
+        print(f"[sim_tracker] 写入: {out}")
+        return
 
     if not prices:
         # 无可成交行情（初始化 / 离线）：记录挂起状态，不实际建仓

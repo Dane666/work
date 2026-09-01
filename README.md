@@ -11,7 +11,9 @@
 stategy/
 ├── src/                      # 全部 Python 代码
 │   ├── signal_generator.py   # V8.1 每日信号生成（日期门控：≤2023 V8 / ≥2024 E组合）
-│   ├── sim_tracker.py        # 模拟盘净值跟踪（按 target_weight 建仓，T+1 开盘成交）
+│   ├── sim_tracker.py        # 模拟盘/实盘执行（--init / --offline / --live 三模式）
+│   ├── chart_utils.py        # 仪表盘增强图（行业暴露/因子暴露/回撤归因，方向B）
+│   ├── risk_manager.py       # 实盘风控与委托单生成（方向C）
 │   ├── strategies/           # 并行策略模块（trend_ema / mean_reversion / vol_breakout）
 │   ├── backtest_v5.py        # 回测引擎（run_backtest_v5 close 口径 / run_backtest_v5_ne next_open+冲击）
 │   ├── fetch_all_v8.py       # 历史数据抓取（1539 只日线+财报，首次约 1-2 小时）
@@ -143,7 +145,96 @@ docker run --rm \
   并入 E 等权组合后 2024-25 显著增强（0.79 vs 0.67）。
 - 详细报告见 `output/report_v8_1_split.html`、`report_v8_1_next_open.html`。
 
-## 八、推送配置（Bark 手机通知）
+## 八、实盘接入指南（方向C · LIVE_MODE）
+
+> **⚠️ 安全提醒**：本节描述如何将策略输出的**委托单 CSV** 喂给券商账户执行。**模拟盘（默认 `LIVE_MODE=false`）与实盘是两套独立流程**，互不影响；
+> 实盘下单必须经过人工复核或可信券商 SDK，**严禁**未经审核的自动下单。
+
+### 1. 开启方式
+
+`LIVE_MODE=true` 是总开关，默认关闭。激活方式（三选一）：
+
+```bash
+# (a) 单次执行（推荐先验证）
+LIVE_MODE=true python src/sim_tracker.py --live
+# 或
+LIVE_MODE=true bash scripts/run_daily.sh
+
+# (b) 写入项目根目录 .env
+echo "LIVE_MODE=true" >> .env
+
+# (c) 改 src/config.py（不推荐，需代码改动）
+RISK_LIVE_MODE = True
+```
+
+开启后 `sim_tracker.py --live` 仅调用 `risk_manager.build_orders(...)` 生成委托单 CSV（`output/orders/YYYY-MM-DD_orders.csv`），**不模拟成交、不修改 `sim_state`**。
+
+### 2. 风控参数（`src/config.py`）
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| `RISK_MAX_DAILY_BUY_AMOUNT` | 100_000 | 单日累计买入上限（元），防止一次性打满仓 |
+| `RISK_MAX_SINGLE_POSITION_PCT` | 0.10 | 单只持仓上限（NAV 占比），与 V8.1 `FIXED_WEIGHT` 对齐 |
+| `RISK_MAX_TOTAL_POSITION_PCT` | 0.90 | 总仓位上限，留 10% 现金应急 |
+| `RISK_MAX_DAILY_LOSS_PCT` | -0.05 | 单日 NAV 跌幅低于此阈值禁止新开仓（熔断） |
+
+### 3. 委托单格式
+
+```csv
+code,name,direction,price_type,price,shares,amount,reason
+600519,贵州茅台,BUY,limit,1700.50,100,170050.00,信号 BUY，目标 10.00%；风控100千/单日100千
+000001,平安银行,SELL,limit,11.85,500,5925.00,信号 SELL（跌出目标组合）
+```
+
+价格口径：`BUY`=`open × 1.0005`（限价+0.05%）、`SELL`=`close × 0.999`（限价-0.10%），均为次日开盘前报送的限价单；行情缺失时回退为市价单。
+
+### 4. 主流券商 Python SDK 对比与接入示例
+
+| 券商 | 接入方式 | 优 | 缺 | 推荐场景 |
+|---|---|---|---|---|
+| **华泰证券**（htsc-quant） | 社区 SDK（非官方） | 协议稳定；量化权限申请门槛中等 | 需自维护认证 token；官方 SDK 不开放 | 个人量化账户、长期部署 |
+| **国信证券**（iQuant） | `gxquant-py-sdk` 社区 + iQuant 平台 | 与 iQuant 平台打通，可回测+实盘 | iQuant 平台部分功能付费 | 已在国信开户、想用统一平台 |
+| **东方财富**（Choice 量化） | 东财终端 + Choice API | 数据源最全（与本策略 akshare 同源） | 自动化下单接口受限；机构通道为主 | 数据研究为主、下单人工 |
+| **同花顺**（iFinD/Hedge） | `thstrader` 社区 SDK | 协议广、社区活跃 | 部分券商需 VPN；下单延迟较高 | 已有同花顺账户、快速接入 |
+
+#### 示例模板（伪代码）
+
+```python
+# 通用委托单执行框架（券商 SDK 由用户接入；以下示例供参考，不绑定任何券商）
+import pandas as pd
+import risk_manager as rm
+
+def place_orders(orders_csv: str, broker_client):
+    """读委托单并通过 broker_client 下单；下单结果写日志（人工监控）。"""
+    orders = pd.read_csv(orders_csv, dtype={"code": str})
+    for _, o in orders.iterrows():
+        if o["direction"] == "BUY":
+            broker_client.buy(code=o["code"], shares=int(o["shares"]),
+                             price_type=o["price_type"], price=float(o["price"]))
+        elif o["direction"] == "SELL":
+            broker_client.sell(code=o["code"], shares=int(o["shares"]),
+                               price_type=o["price_type"], price=float(o["price"]))
+        # 务必先在券商端开启"密码独立 + 资金复核"等安全约束
+
+# 华泰示例（htsc-quant 风格）
+# from htsc_quant import Client
+# client = Client(account=os.environ["HTSC_ACCOUNT"], token=os.environ["HTSC_TOKEN"])
+# place_orders("output/orders/2026-08-28_orders.csv", client)
+
+# 同花顺示例（thstrader 风格）
+# import thstrader
+# trader = thstrader.THS(account=..., pwd=..., exe_path="C:/ths/同花顺/xiadan.exe")
+# place_orders("output/orders/2026-08-28_orders.csv", trader)
+```
+
+### 5. 风险提示
+
+- **先模拟盘，后实盘**：本仓库的 `sim_tracker.py`（默认 `--offline`）已长期回测达标后再考虑实盘。
+- **资金隔离**：实盘账户资金建议 ≤ 总可投金额的 20%~30%，单策略 ≤ 50 万。
+- **人工复核**：建议实盘第一天至少手动核对前 3 笔成交是否与 CSV 一致；任何"全自动化无人值守"都是禁止配置。
+- **风控二次校验**：券商端 App 仍需设置单笔/单日金额上限（与 `config.RISK_*` 对齐），防止 SDK 异常时失控。
+
+## 九、推送配置（Bark 手机通知）
 
 模拟盘每天在三个节点推送 Bark 通知（**纯附加功能，不影响任何策略逻辑**）：
 

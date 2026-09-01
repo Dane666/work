@@ -82,11 +82,11 @@ bash scripts/run_daily.sh
 2. 工作流 `.github/workflows/daily_run.yml`：
    - **调度**：`cron '0 16 * * 1-5'` = UTC 16:00 = 北京时间次日 00:00（数据已收盘）；
      需盘后更早运行改为 `'0 8 * * 1-5'`（北京 16:00）。
-   - **数据**：GitHub Actions 无持久化磁盘。工作流用 `actions/cache` 缓存 `data/`
-     （每日重建）；首次运行会自动执行 `fetch_all_v8.py + fetch_ohlc_v8.py`（约 1-2 小时，
-     在 6 小时免费限制内）。
+   - **数据**：通过 data 分支持久化（`data/` 被 main .gitignore 排除，单独以 data 分支管理）。
+     每次运行先 checkout data 分支取面板 → **`Fetch latest daily panel` 步骤增量拉取最新行情**
+     （见下方第 4 点）→ 跑信号/模拟盘/监控 → Persist 阶段把状态、信号与更新后的面板推回 data 分支。
    - **产出**：信号与净值作为 artifact 上传（Actions 页面可下载）。
-   - 手动触发：Actions 页 → Run workflow。
+   - 手动触发：Actions 页 → Run workflow（可传 `fetch_limit` 快速验证，如 `20`）。
 
 3. **Bark 手机推送（可选）**：每日跑出的信号与模拟盘净值会自动推送至手机（参考 Momentum/notify）。
    - 在仓库 **Settings → Secrets and variables → Actions** 新增仓库密钥 `BARK_DEVICE_KEY`，
@@ -95,8 +95,20 @@ bash scripts/run_daily.sh
    - 推送内容：信号截面日期、BUY/SELL/HOLD 指令数、模拟盘 NAV/累计收益/超额、Top15 买入清单。
    - 本地预览（不推送）：`cd src && python notify_push_daily.py`。
 
-> ⚠️ 局限：GitHub Actions 每次运行都要重放数据（缓存策略受 7 天限制），且需联网抓取。
+> ⚠️ 局限：GitHub Actions 每次运行都要 checkout data 分支重放面板（约 20s），增量拉取依赖
+> 新浪源可达性（美国 runner 实测可访问，前置 curl 12s 探测不可达则快速跳过沿用旧面板）。
 > **生产环境建议用云服务器方案（下节）**，可本地持久化数据、每日运行 < 5 分钟。
+
+4. **数据自动更新（每日增量拉取面板，方向F）**
+   - 面板（`mainboard_close_panel.parquet` / `mainboard_amount_panel.parquet`）不再需要手工拉取，
+     每日 cron 运行前由 `Fetch latest daily panel` 步骤自动增量更新：
+     - `src/update_daily_panel.py`（自包含，不依赖 `src/config.py`，data 分支上可直接运行）
+     - 逐只从新浪源拉增量（qfq 前复权）；检测到复权因子变化自动重拉 365 天替换列尾；
+       盘中未收盘行丢弃；已最新则幂等跳过
+     - 失败兜底：连通性探测失败 / 超时（45min）→ `::warning::` 跳过，沿用现有面板继续，不影响信号与监控
+   - 手动快速验证：`gh workflow run daily_run.yml -f fetch_limit=20`（只拉前 20 只）；
+     cron 默认全量（3046 只，约 30-45 分钟）
+   - 本地手动更新：`cd src && python update_daily_panel.py --limit 20`（试跑）或全量（去掉 --limit）
 
 ## 四、云服务器部署（推荐，数据持久化）
 

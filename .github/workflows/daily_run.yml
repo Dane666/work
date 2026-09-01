@@ -18,6 +18,11 @@ on:
   schedule:
     - cron: '0 16 * * 1-5'
   workflow_dispatch:  # 允许手动触发
+    inputs:
+      fetch_limit:
+        description: '增量拉取股票数（0=全量 3046 只，20=快速验证）'
+        required: false
+        default: '0'
 
 jobs:
   run-strategy:
@@ -112,7 +117,13 @@ jobs:
         timeout-minutes: 45
         run: |
           cd src
-          python update_daily_panel.py || echo "::warning::增量拉取失败/超时，本次沿用现有面板继续（下次运行重试）"
+          # 前置探测：美国 runner 若无法访问新浪源，12s 内快速失败并跳过（不卡 45 分钟）
+          if ! curl -s --max-time 12 -o /dev/null -w "%{http_code}" "https://finance.sina.com.cn/" | grep -qE "^(200|301|302)$"; then
+            echo "::warning::新浪源不可达（海外 runner 网络受限），跳过增量拉取，沿用现有面板"
+            exit 0
+          fi
+          # 手动触发可传 fetch_limit 快速验证（默认 0 = 全量 3046 只）
+          python update_daily_panel.py --limit ${{ inputs.fetch_limit || '0' }} || echo "::warning::增量拉取失败/超时，本次沿用现有面板继续（下次运行重试）"
 
       - name: Run signal generator (V8.1 / 主板版V3)
         env:

@@ -43,6 +43,19 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] === V7.1 每日任务开始 ==="
 # 1) 信号生成（--live 会先拉取最新行情；无网则回退本地最新数据）
 "$PYTHON" signal_generator.py --live
 
+# ---- 实盘模式开关（方向C）：LIVE_MODE=true 时 sim_tracker 仅生成委托单，不模拟成交 ----
+# 委托单写到 output/orders/YYYY-MM-DD_orders.csv，由券商端人工或 SDK 执行；
+# 不会修改 sim_state，不进入净值/持仓跟踪（与本地"模拟盘"是两套独立流程）。
+LIVE_MODE="${LIVE_MODE:-false}"
+if [ "$LIVE_MODE" = "true" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 实盘模式 LIVE_MODE=true → sim_tracker --live 生成委托单"
+    "$PYTHON" sim_tracker.py --live
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 委托单生成完成（券商端执行需人工/SDK）"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] === 实盘模式任务完成 ==="
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] === 实盘模式任务完成 ===" >> "$LOG_FILE"
+    exit 0
+fi
+
 # 2) 净值跟踪（读取上一步信号，按次日开盘/当日收盘模拟成交）
 "$PYTHON" sim_tracker.py
 

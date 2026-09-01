@@ -50,6 +50,10 @@ LIVE_MODE="${LIVE_MODE:-false}"
 if [ "$LIVE_MODE" = "true" ]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 实盘模式 LIVE_MODE=true → sim_tracker --live 生成委托单"
     "$PYTHON" sim_tracker.py --live
+    # 委托单生成后，通过 Bark 推送摘要（无委托单时推送「今日无操作」）
+    # 推送失败/未配置 key 时静默跳过（|| true），不影响已生成的委托单（set -e 保护）。
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 推送委托单摘要（order_push.py）"
+    "$PYTHON" order_push.py || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 委托单推送失败（不影响委托单生成）"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 委托单生成完成（券商端执行需人工/SDK）"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] === 实盘模式任务完成 ==="
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] === 实盘模式任务完成 ===" >> "$LOG_FILE"

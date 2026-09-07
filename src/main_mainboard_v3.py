@@ -251,6 +251,8 @@ def main():
     ap = argparse.ArgumentParser(description="主板版 V3 回测")
     ap.add_argument("--stage", type=int, default=0,
                     help="1=仓位门控 / 2=+质量过滤 / 3=+长动量；0=顺序 1→2→3 达标即停")
+    ap.add_argument("--export-nav", action="store_true",
+                    help="跑完把回测净值序列导出为 data/state/theoretical_nav.csv（周报对比基准）")
     args = ap.parse_args()
 
     global slip_map_
@@ -313,6 +315,8 @@ def main():
               and mf["max_drawdown"] >= TARGET_DD)
         if ok:
             print(f">>> {label} ✅ 达标（0.40/0.60/-22%），停止后续 stage")
+            if args.export_nav:
+                _export_nav(eq)
             _write_report(results, label, eq, mf, mn, st, t0)
             return
 
@@ -320,7 +324,21 @@ def main():
     st = stages[-1]
     mf, mn = results[st]
     print(f">>> 全部 stage 未达标，维持 V8.1 原版")
+    if args.export_nav:
+        _export_nav(eq)
     _write_report(results, None, None, mf, mn, st, t0)
+
+
+def _export_nav(eq: pd.Series) -> None:
+    """把回测净值序列导出为 data/state/theoretical_nav.csv（date,nav 两列）。
+    供 weekly_report.py 周报与模拟盘实际净值对比（理论基准）。"""
+    if eq is None or len(eq) == 0:
+        print("[export-nav] ⚠️ 无净值序列可导出（eq 为空）")
+        return
+    out = pd.DataFrame({"date": eq.index, "nav": eq.values.astype(float)})
+    out.to_csv(config.THEORETICAL_NAV, index=False, encoding="utf-8")
+    print(f"[export-nav] 理论净值已导出: {config.THEORETICAL_NAV} "
+          f"({len(out)} 行, {out['date'].iloc[0]} ~ {out['date'].iloc[-1]})")
 
 
 def _write_report(results, label, eq, mf, mn, st, t0):

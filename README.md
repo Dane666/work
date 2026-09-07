@@ -256,12 +256,21 @@ def place_orders(orders_csv: str, broker_client):
 | 今日执行 | `sim_tracker.py` | 💰 今日执行 {日期} | 实际买入清单（代码/名称/成交价/数量）与卖出清单（代码/名称/成交价），过长截断 |
 | 收盘净值 | `sim_tracker.py` | 📊 收盘净值 {日期} | NAV、当日/累计收益、持仓数、现金占比、CSI300 基准对比 |
 | 持仓预警 | `monitor.py` | ⚠️ 持仓预警 / ✅ 持仓健康 {日期} | 触发卖出条件的持仓清单（止损/止盈/移动止损/估值），最多前 10 只；无预警推「✅ 今日无预警」 |
+| 净值周报 | `weekly_report.py` | 📊 模拟盘周报 {日期} | 每周五：模拟盘 NAV vs 回测理论净值偏差率、本周变化、20日σ；超 ±5% 标题附 ⚠️ |
 
 > **持仓监控预警（方向E · 风控辅助，仅提示不自动执行）**：每日收盘净值更新后 `monitor.py`
 > 自动扫描当前持仓，按 `src/config.py` 阈值生成预警清单：
 > ⚠️ 止损（盈亏率 < -8%）、💰 止盈（> +20%）、📉 移动止损（自持仓期间最高点回撤 > 6%）、
 > 📊 估值偏高（PE > 50，需 `data/pe_panel_mainboard.parquet`，缺失自动跳过）。
 > `LIVE_MODE=false`（默认）仅打印到日志；`LIVE_MODE=true` 时预警随委托单同时推送。
+
+> **净值周报（方向G · 风控辅助）**：每周最后一个交易日对比「模拟盘实际净值」与
+> 「V3.2 回测理论净值」（偏差率 = sim/theo_norm − 1，理论净值在首个共同交易日归一为 1.0，
+> 消除两序列基准差异），输出最新偏差率 / 本周变化 / 20日偏差σ，超 ±5% 附 ⚠️ 预警。
+> 理论基准 `data/state/theoretical_nav.csv` 由回测引擎导出
+> （`cd src && python main_mainboard_v3.py --stage 3 --export-nav`）；缺失时 `weekly_report.py`
+> 自动触发一次导出（约数分钟）。集成：本地 `run_daily.sh` 周五自动执行；Actions
+> `daily_run.yml` 每周五（UTC）同样执行并推送。
 
 ### 1. 获取 Bark Key
 

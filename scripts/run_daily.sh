@@ -71,6 +71,17 @@ fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 持仓监控预警（monitor.py）"
 "$PYTHON" monitor.py || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 持仓监控执行异常（不影响主流程）"
 
+# ---- 周报对比（方向G，风控辅助）：每周五输出模拟盘 vs 回测理论净值偏差周报 ----
+# 判断当天是否为周五（date +%u = 5）；是 → 执行 weekly_report.py 并 Bark 推送摘要，
+# 偏差率超 ±5% 时正文附 ⚠️ 预警。理论净值缺失时脚本自动触发一次回测导出（约数分钟），
+# 失败仅友好提示不中断。非周五跳过（周报每周五收盘后一次）。
+if [ "$(date '+%u')" = "5" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 周五 → 模拟盘周报（weekly_report.py）"
+    "$PYTHON" weekly_report.py --push || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 周报生成异常（不影响主流程）"
+else
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 非周五，跳过周报（weekly_report.py 每周五运行）"
+fi
+
 # ==================== 3. 偏离预警检查（B）====================
 # 非零退出码(=1) 表示预警触发；用 || 捕获避免 set -e 直接中断任务。
 WATCHER_EXIT=0

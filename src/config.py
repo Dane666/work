@@ -22,6 +22,13 @@ DOCS_DIR = BASE_DIR / "docs"                              # GitHub Pages 部署�
 # 与本地的持续模拟盘保持一致。sim_tracker.py 优先从此目录读写状态。
 SIM_STATE_DIR = DATA_DIR / "state"
 
+# 回测理论净值（周报对比基准）：由 main_mainboard_v3.py --export-nav 生成，
+# 列格式 date,nav（与 sim_nav_history.csv 同目录，随 data 分支持久化）。
+THEORETICAL_NAV = SIM_STATE_DIR / "theoretical_nav.csv"
+
+# 周报偏差阈值（与 deviation_watcher 同默认；超出推送 ⚠️ 预警）
+WEEKLY_DEV_THRESHOLD = 0.05       # 最新偏差率 |dev| > ±5% 标记需关注
+
 # ----------------------------------------------------------------------------
 # V8.1 Dashboard（持仓走势图）数据源
 # ----------------------------------------------------------------------------

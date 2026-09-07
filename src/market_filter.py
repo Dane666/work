@@ -156,22 +156,30 @@ def build_ma240_vol_target_weight(index_series: pd.Series,
                                   vol_lookback: int = 756,
                                   vol_q: float = 0.75,
                                   reduced_weight: float = 0.60,
-                                  month_ends=None) -> tuple[pd.Series, pd.DataFrame]:
-    """V7.1 目标权重：MA240 门控之上<b>叠加波动率过滤</b>。
+                                  month_ends=None,
+                                  enable_ma_gate: bool = True) -> tuple[pd.Series, pd.DataFrame]:
+    """V7.1 目标权重：MA{window} 门控之上<b>叠加波动率过滤</b>。
 
-    逻辑（每月末定档，日频前向填充；盘中 MA240 跌破仍硬归 0，保持主门控不变）：
-      - MA240 跌破                 -> 仓位 0%（空仓，继承 V3 框架）
-      - MA240 站上 且 波动率≤历史分位 -> 仓位 100%
-      - MA240 站上 且 波动率>历史分位 -> 仓位 reduced_weight（默认60%，保留部分多头）
+    逻辑（每月末定档，日频前向填充；盘中 MA 跌破仍硬归 0，保持主门控不变）：
+      - MA{window} 跌破        -> 仓位 0%（空仓，继承 V3 框架）
+      - MA{window} 站上 且 波动率≤历史分位 -> 仓位 100%
+      - MA{window} 站上 且 波动率>历史分位 -> 仓位 reduced_weight（默认60%，保留部分多头）
 
     vol 历史分位：以「截至上一交易日的过去 vol_lookback 日年化波动率」的 vol_q 分位数
     为阈值（trailing 窗口、shift(1) 防自指，零未来泄露）。
 
+    enable_ma_gate=False（vol_dynamic 模式）：去掉均线硬门控——不破位清仓，ma_above 恒 True，
+    仅保留波动率动态降档（>分位 → reduced_weight，否则 1.0）。用于回测门控消融实验
+    （main_mainboard_v3.py --gate vol_dynamic，config.GATE_*）。
+
     返回 (target_weight_daily, vol_regime_df)：
-      target_weight_daily : 日频 0 / 0.6 / 1.0
+      target_weight_daily : 日频 0 / reduced_weight / 1.0
       vol_regime_df       : 月频，列 ma_above / vol60 / vol_thr / elevated / target_weight
     """
     ma_above, _ = compute_ma240_daily(index_series, daily_index, window)
+    if not enable_ma_gate:
+        # vol_dynamic：均线硬门控关闭（等价 ma_above 恒 True）
+        ma_above = pd.Series(True, index=daily_index)
     vol60 = csi300_annualized_vol(index_series, daily_index, vol_window)
     # 阈值：trailing vol_lookback 日年化波动率的 vol_q 分位（用 t-1 及之前，防自指）
     vol_thr = (vol60.rolling(vol_lookback, min_periods=vol_lookback // 3)

@@ -197,3 +197,22 @@ MONITOR_TRAILING_STOP = 0.06       # 从最高点回撤超过 6% 时预警（移
 MONITOR_PE_RATIO = 50              # 市盈率超过 50 倍时预警（估值偏高）
 MONITOR_PE_PANEL = DATA_DIR / "pe_panel_mainboard.parquet"  # PE 面板（当前仓库无此文件 → 估值预警自动跳过）
 MONITOR_MAX_DISPLAY = 10           # Bark 推送最多显示前 N 只
+
+# ----------------------------------------------------------------------------
+# 回测门控可配置（main_mainboard_v3.py --gate / --gate-compare）
+# ----------------------------------------------------------------------------
+# V3.2 主门控（回测 tw_base，日频）= 指数 MA{窗口} 硬门控 × 波动率动态降档：
+#   指数站上 MA{窗口} 且 60日年化波动率 ≤ 历史(756日)75分位 → 满仓 1.0
+#   站上但波动率超分位             → 降档 GATE_VOL_REDUCED_WEIGHT（0.60）
+#   跌破 MA{窗口}                  → 清仓 0.0（主门控，继承 V3 框架）
+#   月频定档 + 日频前向填充 + 盘中破位归 0；回测中再与股息率门控 build_dy_gate 相乘。
+# --gate 选项：
+#   ma240（默认，V3.2 基线）→ MA240 门控；ma120 / ma60 → 缩短均线窗口（门控更敏感）；
+#   vol_dynamic → 去掉均线硬门控（不再破位清仓），仅按波动率分位动态降档 0.60/1.0。
+#   用于"门控灵敏度 / 是否保留破位清仓"的消融对比实验（main_mainboard_v3.py --gate-compare）。
+GATE_DEFAULT = "ma240"                          # 默认门控（V3.2 基线，须与既有回测输出一致）
+GATE_MA_WINDOWS = {"ma240": 240, "ma120": 120, "ma60": 60}   # 均线门控窗口表
+GATE_CHOICES = ["ma240", "ma120", "ma60", "vol_dynamic"]     # argparse choices（含基线）
+GATE_VOL_Q = 0.75                               # 波动率历史分位阈值（75 分位）
+GATE_VOL_REDUCED_WEIGHT = 0.60                  # 波动率超分位时的降档仓位
+GATE_VOL_LOOKBACK = 756                         # 波动率分位回看窗口（交易日 ≈3 年）

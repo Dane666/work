@@ -47,10 +47,18 @@ from strategies.trend_ema import gen_signal as sig_trend
 from strategies.vol_breakout import gen_signal as sig_breakout
 from fetch_dividend import get_v2_codes
 
-MA_BASE = 240
+# 均线门控基准窗口（V3.2 基线 = MA240）。--gate ma120/ma60/vol_dynamic 在
+# build_market_gate() 内按 config.GATE_* 切换；MA_BASE 保留供 opt_direction1/2 等
+# 外部模块引用（其值恒等于 config.GATE_MA_WINDOWS[config.GATE_DEFAULT]）。
+MA_BASE = config.GATE_MA_WINDOWS[config.GATE_DEFAULT]
 TOP_N = 30
 CAP = 0.10
 SPLIT_DATE = "2024-01-01"
+
+# V3.2 实盘门槛（compare 报告结论判定用；与工作记忆一致 0.66/0.85/-20%）
+TARGET_V32_FULL = 0.66
+TARGET_V32_NEW = 0.85
+TARGET_V32_DD = -0.20
 
 # V3 验证标准
 TARGET_FULL = 0.40
@@ -98,6 +106,30 @@ def build_dy_gate(div_yield_panel: pd.DataFrame, me: pd.DatetimeIndex) -> pd.Ser
     n_hit = int(hit.sum())
     print(f"  [dy门控] 触发 {n_hit}/{len(me)} 个月（股息率中位数>均值+{DY_GATE_SIGMA}σ，仓位降至 {DY_GATE_WEIGHT:.0%}）")
     return gate
+
+
+def build_market_gate(gate: str, idx, daily_index, me) -> pd.Series:
+    """市场门控 target_weight（日频，0 / GATE_VOL_REDUCED_WEIGHT / 1.0）。
+
+    gate 语义（config.GATE_CHOICES）：
+      - ma240 / ma120 / ma60：指数站上对应 MA{窗口} 才持仓（跌破清仓 0），
+        站上但 60 日年化波动率 > 历史(756日)75 分位 → 降档 0.60；
+      - vol_dynamic：去掉均线硬门控（enable_ma_gate=False，不再破位清仓），
+        仅按波动率分位动态降档（>分位 → 0.60，否则 1.0）。
+    仅替换「市场门控」这一变量；股息率门控（build_dy_gate）在调用方另行相乘。
+    """
+    w = config.GATE_MA_WINDOWS
+    if gate == "vol_dynamic":
+        tw, _ = build_ma240_vol_target_weight(
+            idx, daily_index, window=w[config.GATE_DEFAULT], month_ends=me,
+            vol_q=config.GATE_VOL_Q, reduced_weight=config.GATE_VOL_REDUCED_WEIGHT,
+            vol_lookback=config.GATE_VOL_LOOKBACK, enable_ma_gate=False)
+    else:
+        tw, _ = build_ma240_vol_target_weight(
+            idx, daily_index, window=w[gate], month_ends=me,
+            vol_q=config.GATE_VOL_Q, reduced_weight=config.GATE_VOL_REDUCED_WEIGHT,
+            vol_lookback=config.GATE_VOL_LOOKBACK)
+    return tw
 
 
 def apply_quality_mask(close_m, roe, amount, me, min_roe=MIN_ROE,
@@ -248,9 +280,16 @@ def run_full(close_m, amount, sel_v8, me, tw, enable_sector=None,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="主板版 V3 回测")
+    ap = argparse.ArgumentParser(description="主板版 V3 回测（--gate 门控可配置 / --gate-compare 门控消融对比）")
     ap.add_argument("--stage", type=int, default=0,
                     help="1=仓位门控 / 2=+质量过滤 / 3=+长动量；0=顺序 1→2→3 达标即停")
+    ap.add_argument("--gate", choices=config.GATE_CHOICES, default=None,
+                    help="市场门控（默认 config.GATE_DEFAULT=%s）：ma240/ma120/ma60=指数站上对应均线才持仓"
+                         "（跌破清仓+波动率降档），vol_dynamic=去掉均线硬门仅按波动率动态降档。"
+                         "指定时以完整 V3.2 链（等价 --stage 3）跑单门控实验。" % config.GATE_DEFAULT)
+    ap.add_argument("--gate-compare", action="store_true",
+                    help="门控消融对比：对基线 ma240 + ma120 + ma60 + vol_dynamic 各跑一次完整 V3.2 链，"
+                         "输出 output/report_gate_compare.html（含净值/回撤曲线对比图）")
     ap.add_argument("--export-nav", action="store_true",
                     help="跑完把回测净值序列导出为 data/state/theoretical_nav.csv（周报对比基准）")
     args = ap.parse_args()
@@ -272,10 +311,17 @@ def main():
     rsi = compute_rsi(close_m, config.RSI_WINDOW)
     me = month_ends_in(close_m, config.START_DATE, str(close.index[-1].date()))
 
-    # 基础 MA240+波动率门控（日频）
-    tw_base, _ = build_ma240_vol_target_weight(
-        idx, close_m.index, MA_BASE, month_ends=me,
-        vol_q=0.75, reduced_weight=0.60, vol_lookback=756)
+    # ---- 门控实验分支（--gate-compare 全量消融 / --gate 单门控）----
+    if args.gate_compare:
+        _run_gate_compare(close_m, amount, roe, gpm, dy, idx, rsi, me, t0)
+        return
+    if args.gate is not None:
+        _run_gate_single(args.gate, close_m, amount, roe, gpm, dy, idx, rsi, me,
+                         args.export_nav, t0)
+        return
+
+    # 默认 stage 流程：基础市场门控（日频，V3.2 基线 ma240）
+    tw_base = build_market_gate(config.GATE_DEFAULT, idx, close_m.index, me)
 
     stages = [1, 2, 3] if args.stage == 0 else [args.stage]
     results = {}
@@ -297,11 +343,11 @@ def main():
             cm, rsi, pd.DataFrame(index=cm.index, columns=cm.columns),
             mz, me, use_rev, 0.20, TOP_N)
 
-        # 仓位门控（所有 stage 都有）：tw = MA240门控 × 股息率门控
+        # 仓位门控（所有 stage 都有）：tw = 市场门控 × 股息率门控
         tw = tw_base
         if st >= 1:
-            gate = build_dy_gate(dy, me)
-            gate_daily = gate.reindex(close_m.index).ffill().fillna(1.0)
+            dy_gate = build_dy_gate(dy, me)
+            gate_daily = dy_gate.reindex(close_m.index).ffill().fillna(1.0)
             tw = tw_base * gate_daily
 
         eq = run_full(cm, amount, sel_v8, me, tw)
@@ -327,6 +373,228 @@ def main():
     if args.export_nav:
         _export_nav(eq)
     _write_report(results, None, None, mf, mn, st, t0)
+
+
+def _run_full_chain(gate, close_m, amount, roe, gpm, dy, idx, rsi, me):
+    """完整 V3.2 链（等价 --stage 3 语义）+ 指定市场门控 gate：
+    质量过滤 → 动量合成分(持久性,persistence=True) → V8 选股 →
+    市场门控 × 股息率门控 → 分段回测。返回 (eq, tw_daily)。
+    tw_daily 供报告统计仓位分布（门控行为特征：空仓/降档/满仓占比）。"""
+    cm = apply_quality_mask(close_m.copy(), roe, amount, me)
+    mz = build_mz(cm, roe, gpm, me, long_momentum=True)   # persistence=True（方向1 动量持续性）
+    use_rev = pd.Series(False, index=me)
+    sel_v8, _ = build_selection_v5(
+        cm, rsi, pd.DataFrame(index=cm.index, columns=cm.columns),
+        mz, me, use_rev, 0.20, TOP_N)
+    tw_base = build_market_gate(gate, idx, close_m.index, me)
+    dy_gate = build_dy_gate(dy, me)
+    tw = tw_base * dy_gate.reindex(close_m.index).ffill().fillna(1.0)
+    eq = run_full(cm, amount, sel_v8, me, tw)
+    return eq, tw
+
+
+# 门控展示名与机制说明（对比报告用）
+GATE_DESC = {
+    "ma240":     "指数站上 MA240 才持仓（跌破清仓），波动率超 75 分位降档 0.60 —— V3.2 基线",
+    "ma120":     "门控缩短为 MA120（更敏感），其余与基线一致",
+    "ma60":      "门控缩短为 MA60（最敏感），其余与基线一致",
+    "vol_dynamic": "去掉均线硬门控（不再破位清仓），仅按 60 日年化波动率 vs 756日75分位 动态降档 0.60/1.0",
+}
+
+
+def _run_gate_single(gate, close_m, amount, roe, gpm, dy, idx, rsi, me,
+                     export_nav, t0):
+    """单门控实验：完整 V3.2 链跑指定门控，打印指标（可选导出理论净值）。"""
+    print(f"\n[{datetime.now()}] ==== 单门控实验：{gate}（完整 V3.2 链）====")
+    eq, tw = _run_full_chain(gate, close_m, amount, roe, gpm, dy, idx, rsi, me)
+    mf = compute_metrics(eq)
+    mn = compute_metrics(eq.loc[SPLIT_DATE:])
+    print(f"  → {gate}: 全期年化={mf['annual_return']*100:.1f}% 夏普={mf['sharpe']:.2f} "
+          f"回撤={mf['max_drawdown']*100:.1f}% | 2024-25夏普={mn['sharpe']:.2f} "
+          f"回撤={mn['max_drawdown']*100:.1f}% | 耗时 {datetime.now()-t0}")
+    if export_nav:
+        _export_nav(eq)
+    return eq
+
+
+def _run_gate_compare(close_m, amount, roe, gpm, dy, idx, rsi, me, t0):
+    """门控消融对比：对 GATE_CHOICES（ma240 基线 + ma120/ma60/vol_dynamic）
+    各跑一次完整 V3.2 链，输出 output/report_gate_compare.html。"""
+    gates = list(config.GATE_CHOICES)
+    print(f"\n[{datetime.now()}] ==== 门控消融对比（完整 V3.2 链 × {len(gates)} 门控）====")
+    eqs, tws, mets = {}, {}, {}
+    for g in gates:
+        print(f"\n[{datetime.now()}] ---- 门控 {g} ----")
+        eq, tw = _run_full_chain(g, close_m, amount, roe, gpm, dy, idx, rsi, me)
+        mf = compute_metrics(eq)
+        mn = compute_metrics(eq.loc[SPLIT_DATE:])
+        eqs[g], tws[g], mets[g] = eq, tw, (mf, mn)
+        print(f"  → {g}: 全期年化={mf['annual_return']*100:.1f}% 夏普={mf['sharpe']:.2f} "
+              f"回撤={mf['max_drawdown']*100:.1f}% | 2024-25夏普={mn['sharpe']:.2f} "
+              f"回撤={mn['max_drawdown']*100:.1f}% | 仓位均值={tw.mean():.0%} "
+              f"空仓占比={(tw == 0).mean():.0%} 降档占比={(tw == config.GATE_VOL_REDUCED_WEIGHT).mean():.0%}")
+    _write_gate_compare_report(gates, eqs, tws, mets, t0)
+
+
+def _setup_cn_font() -> bool:
+    """注册系统中文字体并写入 rcParams；无可用字体返回 False（图内文字退化英文）。"""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.font_manager as _fm
+    import matplotlib.pyplot as _plt
+    for p in [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    ]:
+        if os.path.exists(p):
+            try:
+                _fm.fontManager.addfont(p)
+            except Exception:
+                pass
+    for name in ["Noto Sans CJK SC", "PingFang SC", "Hiragino Sans GB",
+                 "WenQuanYi Zen Hei", "Microsoft YaHei", "SimHei",
+                 "Arial Unicode MS"]:
+        try:
+            if _fm.findfont(_fm.FontProperties(family=name),
+                            fallback_to_default=False):
+                _plt.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
+                _plt.rcParams["axes.unicode_minus"] = False
+                return True
+        except Exception:
+            continue
+    _plt.rcParams["axes.unicode_minus"] = False
+    return False
+
+
+def _plot_gate_compare(gates, eqs, nav_png, dd_png) -> None:
+    """净值曲线 + 回撤曲线双图（PNG 落盘，供 HTML 引用）。"""
+    cn = _setup_cn_font()
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    colors = {"ma240": "#2471a3", "ma120": "#c0392b", "ma60": "#d35400",
+              "vol_dynamic": "#16a085"}
+    _zh = (lambda zh, en: zh) if cn else (lambda zh, en: en)
+
+    # 净值曲线
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    for g in gates:
+        eq = eqs[g]
+        ax.plot(eq.index, eq.values, lw=1.3, color=colors.get(g, None),
+                label=f"{g}" + ("" if cn else ""))
+    ax.set_title(_zh("门控消融对比：全期净值（完整 V3.2 链）",
+                     "Gate ablation: full-period NAV (full V3.2 chain)"), fontsize=12)
+    ax.set_xlabel(_zh("日期", "Date")); ax.set_ylabel(_zh("净值（期初=1）", "NAV"))
+    ax.legend(loc="upper left", fontsize=9, framealpha=0.7)
+    ax.grid(alpha=0.3)
+    fig.tight_layout(); fig.savefig(nav_png, dpi=120); plt.close(fig)
+
+    # 回撤曲线
+    fig, ax = plt.subplots(figsize=(11, 4.2))
+    for g in gates:
+        eq = eqs[g]
+        dd = eq / eq.cummax() - 1.0
+        ax.plot(dd.index, dd.values * 100, lw=1.1, color=colors.get(g, None), label=g)
+    ax.set_title(_zh("门控消融对比：回撤曲线（%）", "Gate ablation: drawdown (%)"), fontsize=12)
+    ax.set_xlabel(_zh("日期", "Date")); ax.set_ylabel("%")
+    ax.legend(loc="lower left", fontsize=9, framealpha=0.7)
+    ax.grid(alpha=0.3)
+    fig.tight_layout(); fig.savefig(dd_png, dpi=120); plt.close(fig)
+
+
+def _write_gate_compare_report(gates, eqs, tws, mets, t0) -> None:
+    from pathlib import Path
+    base = "ma240"
+    base_mf, base_mn = mets[base]
+    rows = ""
+    for g in gates:
+        mf, mn = mets[g]
+        tw = tws[g]
+        ok = (mf["sharpe"] >= TARGET_V32_FULL and mn["sharpe"] >= TARGET_V32_NEW
+              and mf["max_drawdown"] >= TARGET_V32_DD)
+        badge = "✅" if ok else "❌"
+        d_sh = mf["sharpe"] - base_mf["sharpe"]
+        d_dd = (mf["max_drawdown"] - base_mf["max_drawdown"]) * 100
+        rows += (f"<tr><td><b>{g}</b>{'（基线）' if g == base else ''}</td>"
+                 f"<td style='text-align:left;font-size:12px'>{GATE_DESC[g]}</td>"
+                 f"<td>{mf['annual_return']*100:.1f}%</td>"
+                 f"<td>{mf['sharpe']:.2f}</td><td>{mf['max_drawdown']*100:.1f}%</td>"
+                 f"<td>{mn['sharpe']:.2f}</td><td>{mn['max_drawdown']*100:.1f}%</td>"
+                 f"<td>{tw.mean():.0%}</td><td>{(tw == 0).mean():.0%}</td>"
+                 f"<td>{badge}</td></tr>")
+        print(f"  [报告] {g}: Δ夏普vs基线 {d_sh:+.2f}, Δ回撤 {d_dd:+.1f}pp "
+              f"{'✅达标' if ok else '未达标'}(0.66/0.85/-20%)")
+
+    # 结论：达标优先 → 2024-25 夏普最高且回撤≥门槛
+    cands = [g for g in gates if mets[g][0]["max_drawdown"] >= TARGET_V32_DD]
+    scored = sorted(cands, key=lambda g: (-(1 if (mets[g][0]['sharpe'] >= TARGET_V32_FULL
+                                                  and mets[g][1]['sharpe'] >= TARGET_V32_NEW) else 0),
+                                           -mets[g][1]["sharpe"]))
+    best = scored[0] if scored else max(gates, key=lambda g: mets[g][1]["sharpe"])
+    b_mf, b_mn = mets[best]
+    b_ok = (b_mf["sharpe"] >= TARGET_V32_FULL and b_mn["sharpe"] >= TARGET_V32_NEW
+            and b_mf["max_drawdown"] >= TARGET_V32_DD)
+    if best == base:
+        b_tag = "基线门控"
+    else:
+        b_tag = "✅ 达 V3.2 门槛 0.66/0.85/-20%" if b_ok else "未达 V3.2 门槛"
+    verdict_html = ("<b>推荐门控：{g}</b> —— 全期夏普 {fs:.2f} / 2024-25夏普 {ns:.2f} "
+                    "/ 回撤 {dd:.1f}%（{tag}）").format(
+        g=best, fs=b_mf["sharpe"], ns=b_mn["sharpe"],
+        dd=b_mf["max_drawdown"] * 100, tag=b_tag)
+
+    config.OUTPUT_DIR.mkdir(exist_ok=True)
+    nav_png = config.OUTPUT_DIR / "gate_compare_nav.png"
+    dd_png = config.OUTPUT_DIR / "gate_compare_dd.png"
+    try:
+        _plot_gate_compare(gates, eqs, nav_png, dd_png)
+    except Exception as e:      # 图失败不阻断 HTML（工程坑：字体/后端）
+        print(f"  [报告] ⚠️ 净值图生成失败（跳过，仅出表）: {e}")
+        nav_png = dd_png = None
+
+    imgs = ""
+    if nav_png and nav_png.exists():
+        imgs += f"<h2>净值曲线</h2><img src='{nav_png.name}' style='max-width:100%'>"
+    if dd_png and dd_png.exists():
+        imgs += f"<h2>回撤曲线</h2><img src='{dd_png.name}' style='max-width:100%'>"
+
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>门控消融对比报告（ma240/ma120/ma60/vol_dynamic）</title>
+<style>body{{font-family:-apple-system,'PingFang SC',sans-serif;max-width:1200px;margin:24px auto;padding:0 16px;color:#222}}
+table{{border-collapse:collapse;width:100%;margin:14px 0;font-size:13px}}
+th,td{{border:1px solid #ddd;padding:7px 9px;text-align:center}}
+th{{background:#f5f5f5}} h2{{border-bottom:2px solid #eee;padding-bottom:6px;margin-top:30px}}
+.note{{background:#f2f6fc;border-left:4px solid #4a7abb;padding:10px 14px;font-size:13px;color:#444;margin:12px 0}}
+.verdict{{background:#fff7e6;border:1px solid #f0c36d;border-radius:6px;padding:12px 16px;margin:16px 0}}
+img{{max-width:100%;margin:6px 0}}</style></head><body>
+<h1>门控消融对比：MA窗口 & 波动率动态</h1>
+<p>引擎：<b>完整 V3.2 链</b>（质量过滤 ROE≥5%/额≥2000万/上市1年 + 持久性动量 + 股息率门控 σ0.20→仓位20%
++ 行业中性化 cap×1.0），仅切换「市场门控」一个变量。
+选股池：V8 指数成分 ∩ 主板 60/00（1004 只）｜月频｜分档滑点｜段1 V8(≤2023)→段2 E等权(≥2024)。</p>
+<div class="note"><b>门控机制（config.GATE_* 可配置）：</b>市场门控为日频 target_weight =
+MA{'{窗口}'}×波动率：指数站上均线才持仓（跌破清仓 0），站上但 60 日年化波动率 &gt; 历史(756日)75 分位 →
+降档 0.60，否则 1.0；再与股息率门控相乘。
+<b>ma120 / ma60</b>：仅缩短均线窗口（更早离场/入场）；<b>vol_dynamic</b>：去掉均线硬门
+（不再破位清仓，波动率超分位 → 0.60，否则 1.0）。全期回测 2018-01 ~ {eqs[gates[0]].index[-1].date()}。</div>
+<h2>指标对比（V3.2 门槛：全期≥0.66 / 2024-25≥0.85 / 回撤≥-20%）</h2>
+<table><thead><tr><th>门控</th><th>机制</th><th>全期年化</th><th>全期夏普</th><th>全期回撤</th>
+<th>2024-25夏普</th><th>2024-25回撤</th><th>日均仓位</th><th>空仓占比</th><th>达标</th></tr></thead>
+<tbody>{rows}</tbody></table>
+<div class="verdict"><b>{verdict_html}</b><br><span style="font-size:12px;color:#777">
+基线 ma240：全期夏普 {base_mf['sharpe']:.2f} / 2024-25 {base_mn['sharpe']:.2f} / 回撤 {base_mf['max_drawdown']*100:.1f}%
+（应复现 V3.2 主版本 0.76/1.23/-19.5%；数据截止 {eqs[base].index[-1].date()} 与此前快照不同年份，指标以本表为准）。</span></div>
+{imgs}
+<p style="font-size:12px;color:#999">生成于 {datetime.now().strftime('%Y-%m-%d %H:%M')} 耗时 {datetime.now()-t0}｜
+引擎零改动；门控合并入 target_weight，未触碰 backtest_v5/backtest_combo 主逻辑。</p>
+</body></html>"""
+    out = config.OUTPUT_DIR / "report_gate_compare.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"\n[{datetime.now()}] 门控对比报告: {out}  耗时 {datetime.now()-t0}")
 
 
 def _export_nav(eq: pd.Series) -> None:

@@ -156,6 +156,13 @@ docker run --rm \
 - Breakout（接近20日高点+放量）2024-25 夏普 0.88 极强但全期回撤 -35.8%，未独立上线；
   并入 E 等权组合后 2024-25 显著增强（0.79 vs 0.67）。
 - 详细报告见 `output/report_v8_1_split.html`、`report_v8_1_next_open.html`。
+- **门控消融（2026-09-07）**：`--gate ma120/ma60/vol_dynamic` 消融证实 MA240 硬门控不可替代——
+  缩短均线（ma120 全期 0.38 / ma60 0.24）更早离场踏空反弹，全期夏普随窗口缩短单调下降
+  （基线 ma240 = 0.76/1.23/-19.5% 唯一达 V3.2 门槛）；去掉破位清仓（vol_dynamic 空仓占比 0%）
+  熊市硬扛致回撤 -69.8%，策略失效。模拟盘 signal_generator 固定 MA240 与结论一致，无需联动修改。
+- 门控可配置用法：`cd src && python main_mainboard_v3.py --gate ma120`（单门控完整链）或
+  `python main_mainboard_v3.py --gate-compare`（4 门控消融，输出 `output/report_gate_compare.html`）。
+  参数集中在 `src/config.py` 的 `GATE_DEFAULT / GATE_MA_WINDOWS / GATE_VOL_*`。
 
 ## 八、实盘接入指南（方向C · LIVE_MODE）
 

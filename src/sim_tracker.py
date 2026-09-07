@@ -131,6 +131,80 @@ def fetch_day_prices(codes, date: pd.Timestamp) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 离线价格（P0-2：--offline 用收盘面板价真实建仓/盯市，替代实时行情）
+# ---------------------------------------------------------------------------
+_close_panel_cache = None
+
+
+def _load_close_panel() -> pd.DataFrame:
+    """主板收盘面板（懒加载缓存）。"""
+    global _close_panel_cache
+    if _close_panel_cache is None:
+        _close_panel_cache = pd.read_parquet(config.MB_CLOSE).sort_index()
+    return _close_panel_cache
+
+
+def load_offline_prices(codes, sig_date, as_of, state) -> dict:
+    """P0-2：从主板收盘面板构造执行价 {code: {'open': px, 'close': px}}。
+
+    背景：Actions 美国 runner 无法访问实时行情源，原 --offline 只记录「挂起」从不
+    成交，净值恒为 1.0。现改由收盘面板（data 分支每日就绪）提供执行价：
+
+    执行日选取（与回测「T 日收盘成交」口径一致，无前视）：
+      - 优先：信号日 < d <= as_of 的【最早】面板交易日（真 T+1 收盘执行）；
+      - 回退：面板尚无次日行时（Actions cron 于北京时间 0:00 运行，信号 dated=当日、
+        数据截面=前一交易日），取面板中 <= 信号日的最近交易日 = 实际截面日收盘
+        —— 与回测「月末截面收盘选股、同日收盘成交」完全一致。
+    open=close=该日收盘价（面板无 open 列）；滑点在 execute_day 内另行叠加。
+    持仓代码一并纳入（HOLD 股每日盯市），停牌/无价股不在返回中（execute_day 沿用成本）。
+
+    返回空 dict 时调用方走原有「挂起」兜底路径。
+    """
+    if not config.USE_MAINBOARD:
+        print(f"[sim_tracker] --offline 面板价成交当前仅支持主板模式"
+              f"（config.USE_MAINBOARD=True），本次挂起")
+        return {}
+    if not config.MB_CLOSE.exists():
+        print(f"[sim_tracker] --offline 需主板收盘面板 {config.MB_CLOSE.name}"
+              f"（main 分支不跟踪 data/，可 git checkout origin/data -- data/ 恢复），本次挂起")
+        return {}
+    try:
+        panel = _load_close_panel()
+    except Exception as e:
+        print(f"[sim_tracker] 收盘面板读取失败（{e}），本次挂起")
+        return {}
+    sig_ts = pd.Timestamp(sig_date).normalize()
+    asof_ts = pd.Timestamp(as_of).normalize()
+    after = panel.index[(panel.index > sig_ts) & (panel.index <= asof_ts)]
+    if len(after):
+        d, mode = after[0], "T+1收盘(面板)"
+    else:
+        prior = panel.index[panel.index <= sig_ts]
+        if not len(prior):
+            print(f"[sim_tracker] --offline 面板无 ≤{sig_ts.date()} 的交易日"
+                  f"（面板最早 {panel.index[0].date()}），本次挂起")
+            return {}
+        d, mode = prior[-1], ("T收盘(面板)" if prior[-1] == sig_ts
+                              else f"截面回退({prior[-1].date()})")
+    # 逐股取 <= 执行上限日 d 的最近有效收盘（面板若部分交易日整列缺失——如某次增量拉取
+    # 中断只覆盖部分股票——仍以该股最近可得价成交/盯市，避免大面积跳过）。
+    need = sorted(set(str(c) for c in codes)
+                  | set(state.get("positions", {}).keys()))
+    prices = {}
+    for c in need:
+        if c not in panel.columns:
+            continue
+        s = panel.loc[:d, c].dropna()
+        if len(s):
+            v = float(s.iloc[-1])
+            if v > 0:
+                prices[c] = {"open": v, "close": v}
+    print(f"[sim_tracker] --offline 面板价成交：执行日上限={d.date()}（{mode}，信号日={sig_ts.date()}），"
+          f"可得价 {len(prices)}/{len(need)} 只（逐股最近有效收盘，含持仓盯市）")
+    return prices
+
+
+# ---------------------------------------------------------------------------
 # 状态读写
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
@@ -145,7 +219,8 @@ def load_state() -> dict:
 def _empty_state() -> dict:
     return {"init_date": None, "cash": 1.0, "positions": {},
             "nav": 1.0, "pending_buys": [], "pending_sells": [],
-            "last_nav_date": None}
+            "last_nav_date": None,
+            "last_regime_weight": None}   # P0-3：上次信号的 regime_weight（%），避免重复清仓/供追溯
 
 
 def _apply_start_date(st: dict) -> None:
@@ -284,6 +359,14 @@ def load_benchmark(base_date=None) -> pd.Series:
 # ---------------------------------------------------------------------------
 # 执行一笔信号日的模拟交易
 # ---------------------------------------------------------------------------
+def _sig_name(signal_df: pd.DataFrame, code: str) -> str:
+    """从信号表反查股票名称（regime 清仓时持仓股可能不在 BUY/SELL 行）。"""
+    hit = signal_df[signal_df["code"].astype(str) == code]
+    if len(hit) and "name" in hit.columns:
+        return str(hit["name"].iloc[0])
+    return code
+
+
 def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
                 state: dict, slip_map: dict, prices: dict):
     """按信号在 date 日成交，更新 state，返回当日 NAV 信息。
@@ -305,6 +388,26 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
     deployed = sum(h["shares"] * h["cost"] for h in positions.values())  # 现有持仓实际占用现金
 
     buys_executed, sells_executed = [], []   # 实际成交明细（仅用于 Bark 推送，不影响策略）
+    regime_exit = False
+
+    # P0-3（保真度审计）：regime 门控归零（MA240 跌破）→ 与回测 regime_exit 一致，全部清仓避险。
+    # 回测在 regime<=0 的交易日以收盘价清仓退出；模拟盘此前仅把 BUY 预算置 0（=0 不买），
+    # 存量持仓继续 HOLD → 熊市段模拟盘满仓而回测空仓，净值不可比（回测高估）。
+    # 空仓时自然无操作（buys 预算=0 亦不会建仓）；残留未成交股（停牌）会在后续 regime<=0
+    # 日继续尝试补清，直至清空。
+    if regime_w <= 1e-9 and positions:
+        regime_exit = True
+        for c in list(positions.keys()):
+            p = prices.get(c)
+            if p is None:
+                continue            # 无当日价：本次无法成交（停牌/无价），保留待下日补清
+            slip = slip_map.get(c, 0.0050)
+            sell_price = p["close"] * (1 - slip)          # 卖出滑点（减价）
+            proceeds = positions[c]["shares"] * sell_price
+            cash += proceeds
+            del positions[c]
+            sells_executed.append({"code": c, "name": _sig_name(signal_df, c),
+                                   "price": sell_price})
 
     for r in buys:
         c = str(r["code"])
@@ -361,7 +464,8 @@ def execute_day(signal_df: pd.DataFrame, date: pd.Timestamp,
             pos_val += h["shares"] * h["cost"]      # 无当日价则沿用成本
     nav = cash + pos_val
     return {"cash": cash, "positions": positions, "nav": nav, "pos_val": pos_val,
-            "buys_executed": buys_executed, "sells_executed": sells_executed}
+            "buys_executed": buys_executed, "sells_executed": sells_executed,
+            "regime_exit": regime_exit}
 
 
 # ---------------------------------------------------------------------------
@@ -416,14 +520,34 @@ def main():
 
     sig_df = pd.read_csv(SIGNAL_DIR / sig_name, dtype={"code": str})
     print(f"[{datetime.now()}] 读取信号: {sig_name}（执行日={as_of.date()}）")
+    # P0-3：regime_weight（%制，0=MA240 跌破门控归零）——用于清仓决策与状态追溯
+    raw_regime = (float(sig_df["regime_weight"].iloc[0])
+                  if len(sig_df) and "regime_weight" in sig_df.columns else 100.0)
 
     # 滑点分级（与 V7.1 一致，仅成本模型，非信号）
-    amount = pd.read_parquet(config.DATA_DIR / "v6_amount_panel.parquet")
+    # P0-1（保真度审计）：主板模式（USE_MAINBOARD=True）必须用主板成交额面板 MB_AMOUNT。
+    # 旧代码用 v6_amount_panel（仅 526 只 V8 池）→ 主板信号 75.6% 落入 0.5% fallback，
+    # 滑点被系统性高估（回测同批股按真实分档 0.1%-0.3%）。V8 链路（USE_MAINBOARD=False）
+    # 保持 v6_amount_panel 不变（与回测段1/段2 数据源一致）。
+    amount = pd.read_parquet(config.MB_AMOUNT if config.USE_MAINBOARD
+                             else config.V6_AMOUNT_PANEL)
     slip_map, _ = build_slippage_map(amount)
 
-    # 试图获取执行日价格（离线模式 / 初始化均不拉取实时行情）
     codes_all = list(sig_df["code"].astype(str))
-    prices = fetch_day_prices(codes_all, as_of) if (not args.init and not args.offline) else {}
+    # 执行价来源：
+    #   - 实时模式（本地盘后/云服务器）：akshare 拉取执行日当日 open/close
+    #   - --live（实盘委托单）：仍需实时行情（委托单面向真实成交）
+    #   - P0-2 --offline（Actions 美国 runner 无实时源）：改用收盘面板价真实建仓 + 每日盯市
+    #     （load_offline_prices 按"信号日之后首个面板交易日，否则截面日收盘"取价），不再挂起
+    #   - --init：仅记录初始状态不成交
+    if args.init:
+        prices = {}
+    elif args.live:
+        prices = fetch_day_prices(codes_all, as_of)
+    elif args.offline:
+        prices = load_offline_prices(codes_all, sig_date, as_of, state)
+    else:
+        prices = fetch_day_prices(codes_all, as_of)
 
     # ---- 实盘模式（方向C）：仅生成委托单，不修改 sim_state、不实际成交 ----
     if args.live:
@@ -452,9 +576,10 @@ def main():
         return
 
     if not prices:
-        # 无可成交行情（初始化 / 离线）：记录挂起状态，不实际建仓
+        # 无可成交行情（初始化 / 离线且面板不可用）：记录挂起状态，不实际建仓
         state["pending_buys"] = list(sig_df[sig_df["action"] == "BUY"]["code"].astype(str))
         state["pending_sells"] = list(sig_df[sig_df["action"] == "SELL"]["code"].astype(str))
+        state["last_regime_weight"] = raw_regime
         save_state(state)
         bench = load_benchmark(state.get("init_date") or as_of)
         b_nav = float(bench.get(as_of, bench.iloc[-1])) if as_of in bench.index else 1.0
@@ -484,7 +609,15 @@ def main():
     state["nav"] = res["nav"]
     state["pending_buys"] = []
     state["pending_sells"] = []
+    state["last_regime_weight"] = raw_regime          # P0-3：记录本次 regime，供追溯/防重复
     save_state(state)
+
+    # P0-3：regime 清仓触发提示（与回测 regime_exit 对齐）
+    if res.get("regime_exit"):
+        n_sold = len(res.get("sells_executed", []))
+        print(f"[{datetime.now()}] ⚠️ regime 清仓触发（regime_weight={raw_regime:g}，"
+              f"MA240 门控归零）：{n_sold} 只持仓按执行日收盘价全部卖出，仓位归零"
+              f"（与回测 regime_exit 一致）")
 
     # ---- Bark 推送①：今日执行（盘前成交清单；可选，未配置 key 自动跳过）----
     bark_key = getattr(config, "BARK_DEVICE_KEY", "") or os.environ.get("BARK_DEVICE_KEY", "")

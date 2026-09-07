@@ -60,6 +60,9 @@ MB_GPM = DATA_DIR / "gpm_yoy_panel_mainboard.parquet"
 MB_OHLCV = DATA_DIR / "mainboard_ohlcv.pkl"
 MB_UNIVERSE_JSON = DATA_DIR / "mainboard_universe.json"
 
+# V8 池成交额面板（仅 USE_MAINBOARD=False 的 V8 链路用；主板模式 sim_tracker 滑点用 MB_AMOUNT）
+V6_AMOUNT_PANEL = DATA_DIR / "v6_amount_panel.parquet"
+
 # ----------------------------------------------------------------------------
 # 回测时间范围与样本划分
 # ----------------------------------------------------------------------------

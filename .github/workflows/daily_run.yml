@@ -114,7 +114,12 @@ jobs:
       # 兜底：美国 runner 若无法访问新浪源，socket 20s 超时快速失败；
       # `|| echo` 保证流程继续（沿用现有面板），不影响信号/监控。
       - name: Fetch latest daily panel (增量拉取)
-        timeout-minutes: 45
+        # 全量 3046 只实测约 100-160 分钟（2-3s/只）；45 分钟不足会触发 step 超时直接失败
+        # 并连带跳过后续全部步骤（2026-09-07 run 34075789509 实测）。放宽至 240 分钟。
+        timeout-minutes: 240
+        # 即使拉取失败/超时也继续后续步骤（signal/sim/monitor 沿用现有面板），
+        # 保证每日信号与监控不中断。面板缺失时才由 sim_tracker 内部挂起兜底。
+        continue-on-error: true
         run: |
           cd src
           # 前置探测：美国 runner 若无法访问新浪源，12s 内快速失败并跳过（不卡 45 分钟）

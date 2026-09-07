@@ -585,7 +585,7 @@ MA{'{窗口}'}×波动率：指数站上均线才持仓（跌破清仓 0），�
 <table><thead><tr><th>门控</th><th>机制</th><th>全期年化</th><th>全期夏普</th><th>全期回撤</th>
 <th>2024-25夏普</th><th>2024-25回撤</th><th>日均仓位</th><th>空仓占比</th><th>达标</th></tr></thead>
 <tbody>{rows}</tbody></table>
-<div class="verdict"><b>{verdict_html}</b><br><span style="font-size:12px;color:#777">
+<div class="verdict">{verdict_html}<br><span style="font-size:12px;color:#777">
 基线 ma240：全期夏普 {base_mf['sharpe']:.2f} / 2024-25 {base_mn['sharpe']:.2f} / 回撤 {base_mf['max_drawdown']*100:.1f}%
 （应复现 V3.2 主版本 0.76/1.23/-19.5%；数据截止 {eqs[base].index[-1].date()} 与此前快照不同年份，指标以本表为准）。</span></div>
 {imgs}

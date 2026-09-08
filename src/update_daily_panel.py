@@ -24,8 +24,12 @@ update_daily_panel.py — 主板面板每日增量更新（轻量，替代全量
 
 注意：本脚本【不依赖 src/config.py】——data 分支只有 data/ 目录（无代码），
 由 scripts/run_update_data.sh（本机）或 daily_run.yml（GitHub Actions）在
-data 面板所在工作树运行，故路径自包含。已加 socket 20s 全局超时，
-Actions 美国 runner 若无法访问新浪源会快速失败（不会卡死数小时）。
+data 面板所在工作树运行，故路径自包含。已加两层超时防护：
+1) socket 20s 全局超时（覆盖大部分读/连接阻塞）；
+2) 单只股票拉取 30s 看门狗（_run_guarded，daemon 线程 + join(timeout) 实现，
+   超时即放弃该请求并跳过该股票，不阻塞整体）。
+2026-09-08 曾实测全量增量在 400/3046 只后单只请求永久挂起 3.5h（socket 超时
+未兜住，疑似 DNS 解析层卡死）拖死整个步骤 —— 第二层即为此补的兜底。
 
 输出（原地更新，仅当有新数据时）：
     data/mainboard_close_panel.parquet   (date × code 收盘价，qfq)
@@ -38,6 +42,7 @@ import argparse
 import os
 import socket
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -64,6 +69,7 @@ import akshare as ak
 SINA_RETRIES = 5          # 单只失败重试次数
 SINA_SLEEP = 1.0          # 重试间隔（秒）
 REQ_GAP = 0.08            # 正常请求间隔（秒），防新浪限流
+STOCK_TIMEOUT = 30        # 单只股票单次拉取看门狗（秒）：超时放弃该请求，跳过该股票
 FWD_WINDOW = 30           # 增量拉取窗口（自然日，覆盖 last_date 当天，用于复权对比）
 RESET_WINDOW = 365        # 复权变化时重拉窗口（自然日）
 TRADE_CLOSE_HM = (15, 30)  # 北京收盘保护时刻：晚于此且最新行==今天 才视为已收盘
@@ -96,6 +102,44 @@ def fetch_sina_incremental(code: str, start_d: str) -> pd.DataFrame | None:
             time.sleep(SINA_SLEEP)
     print(f"  [warn] {code} 新浪增量失败: {repr(last)[:80]}")
     return None
+
+
+def _run_guarded(fn, *args, timeout: float = STOCK_TIMEOUT, label: str = ""):
+    """单只请求看门狗：fn 在 daemon 线程中执行，超过 timeout 秒放弃等待。
+
+    背景（2026-09-08 实测）：全量增量曾在 400/3046 只后单只请求永久挂起 3.5 小时
+    （socket 20s 超时未兜住，疑似 DNS 解析层卡死），直到 240min 步骤超时被 kill。
+    线程无法被强杀，但 daemon 线程不会阻止进程退出——主流程放弃等待后继续下一只，
+    把『单只无限挂起』降级为『单只 30s 跳过』，不阻塞整体流程。
+
+    注：不用 concurrent.futures.ThreadPoolExecutor——其 daemon worker 会在解释器
+    退出时被模块级 _python_exit join()，残留的挂死线程会导致进程退出也卡住；
+    原生 daemon Thread 无此问题。线程等待 + join(timeout) 的语义与
+    concurrent.futures.TimeoutError 一致，且避免 signal.alarm 对主线程的干扰。
+
+    返回 (ok, result)：ok=True 为 fn 正常返回（result 可能为 None，如拉取重试后失败）；
+    ok=False 表示超时已被放弃，调用方应跳过该股票。
+    """
+    box: dict = {}
+
+    def _worker() -> None:
+        try:
+            box["result"] = fn(*args)
+        except Exception as e:      # fetch_sina_incremental 内部已捕获重试；此处仅兜底
+            box["error"] = e
+        box["done"] = True
+
+    t = threading.Thread(target=_worker, name="sina-watchdog", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        tag = f" [{label}]" if label else ""
+        print(f"  [timeout]{tag} 超过 {timeout:.0f}s 未完成 → 放弃该请求（跳过，不阻塞整体）")
+        return False, None
+    if "error" in box:
+        print(f"  [warn] {label or '请求'} 异常: {repr(box['error'])[:80]}")
+        return True, None
+    return True, box.get("result")
 
 
 def _drop_intraday_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -136,7 +180,10 @@ def update_panel(codes: list, close_panel: pd.DataFrame, amount_panel: pd.DataFr
         panel_last = float(col.iloc[-1]) if len(col) else np.nan
 
         start_d = (last_date - timedelta(days=FWD_WINDOW)).strftime("%Y%m%d")
-        d = fetch_sina_incremental(code, start_d)
+        ok, d = _run_guarded(fetch_sina_incremental, code, start_d, label=f"{code} 增量拉取")
+        if not ok:  # 30s 看门狗超时：放弃该股票，继续下一只
+            time.sleep(REQ_GAP)
+            continue
         if d is None or len(d) == 0:
             print(f"  skip {code}: 增量无数据（可能长期停牌）")
             time.sleep(REQ_GAP)
@@ -158,9 +205,10 @@ def update_panel(codes: list, close_panel: pd.DataFrame, amount_panel: pd.DataFr
         if adj_changed:
             # 复权因子变化 → 重拉较长窗口，替换该列尾部
             start_d2 = (last_date - timedelta(days=RESET_WINDOW)).strftime("%Y%m%d")
-            d2 = fetch_sina_incremental(code, start_d2)
-            if d2 is None or len(d2) == 0:
-                print(f"  skip {code}: 复权重拉失败，保留原数据")
+            ok2, d2 = _run_guarded(fetch_sina_incremental, code, start_d2,
+                                   label=f"{code} 复权重拉")
+            if not ok2 or d2 is None or len(d2) == 0:
+                print(f"  skip {code}: 复权重拉失败或超时，保留原数据")
                 time.sleep(REQ_GAP)
                 continue
             d2 = _drop_intraday_rows(d2)

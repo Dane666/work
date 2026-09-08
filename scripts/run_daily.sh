@@ -71,6 +71,12 @@ fi
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 持仓监控预警（monitor.py）"
 "$PYTHON" monitor.py || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 持仓监控执行异常（不影响主流程）"
 
+# ---- 净值回撤预警（风控辅助·净值事后审计）：净值 vs 历史峰值，超 -5%/-10%/-15% 推送 ⚠️/🚨/🔴 ----
+# 只读 sim_nav_history.csv，不写净值、不改策略逻辑；同级不重复推送
+# （幂等标记 data/state/last_dd_level.txt）；空仓挂起 NAV=1.0 无回撤 → 打印健康不推送。
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] 净值回撤预警（drawdown_watcher.py）"
+"$PYTHON" drawdown_watcher.py --push || echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ 净值回撤预警执行异常（不影响主流程）"
+
 # ---- 周报对比（方向G，风控辅助）：每周五输出模拟盘 vs 回测理论净值偏差周报 ----
 # 判断当天是否为周五（date +%u = 5）；是 → 执行 weekly_report.py 并 Bark 推送摘要，
 # 偏差率超 ±5% 时正文附 ⚠️ 预警。理论净值缺失时脚本自动触发一次回测导出（约数分钟），

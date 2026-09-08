@@ -255,7 +255,7 @@ def place_orders(orders_csv: str, broker_client):
 
 ## 九、推送配置（Bark 手机通知）
 
-模拟盘每天在三个节点推送 Bark 通知（**纯附加功能，不影响任何策略逻辑**）：
+模拟盘每天在多个节点推送 Bark 通知（**纯附加功能，不影响任何策略逻辑**）：
 
 | 节点 | 触发脚本 | 标题 | 内容 |
 |---|---|---|---|
@@ -264,6 +264,7 @@ def place_orders(orders_csv: str, broker_client):
 | 收盘净值 | `sim_tracker.py` | 📊 收盘净值 {日期} | NAV、当日/累计收益、持仓数、现金占比、CSI300 基准对比 |
 | 持仓预警 | `monitor.py` | ⚠️ 持仓预警 / ✅ 持仓健康 {日期} | 触发卖出条件的持仓清单（止损/止盈/移动止损/估值），最多前 10 只；无预警推「✅ 今日无预警」 |
 | 净值周报 | `weekly_report.py` | 📊 模拟盘周报 {日期} | 每周五：模拟盘 NAV vs 回测理论净值偏差率、本周变化、20日σ；超 ±5% 标题附 ⚠️ |
+| 净值回撤 | `drawdown_watcher.py` | ⚠️/🚨/🔴 净值回撤{关注/警戒/严重} | 每日：净值 vs 历史峰值回撤，-5%/-10%/-15% 三档；同级不重复推送，自预警恢复推 ✅ 修复 |
 
 > **持仓监控预警（方向E · 风控辅助，仅提示不自动执行）**：每日收盘净值更新后 `monitor.py`
 > 自动扫描当前持仓，按 `src/config.py` 阈值生成预警清单：
@@ -278,6 +279,14 @@ def place_orders(orders_csv: str, broker_client):
 > （`cd src && python main_mainboard_v3.py --stage 3 --export-nav`）；缺失时 `weekly_report.py`
 > 自动触发一次导出（约数分钟）。集成：本地 `run_daily.sh` 周五自动执行；Actions
 > `daily_run.yml` 每周五（UTC）同样执行并推送。
+
+> **净值回撤预警（风控辅助 · 净值事后审计）**：每日收盘后 `drawdown_watcher.py` 对比
+> 模拟盘净值与历史峰值（回撤 = 当前净值/峰值 − 1，只读 `sim_nav_history.csv`，不修改策略）。
+> 回撤超 -5% / -10% / -15% 分别推送 ⚠️ 关注 / 🚨 警戒 / 🔴 严重（阈值见 `config.DD_*_THRESHOLD`），
+> 附当前净值、历史峰值、回撤起始日与持续天数；**同级不重复推送**（幂等标记
+> `data/state/last_dd_level.txt`，随 data 分支持久化），级别加深逐级推送，自预警恢复健康
+> 推送一次 ✅ 修复。空仓挂起 NAV=1.0 无回撤 → 打印「✅ 净值无异常回撤」不推送。
+> 集成：本地 `run_daily.sh` 与 Actions `daily_run.yml` 均在 monitor 之后执行 `drawdown_watcher.py --push`。
 
 ### 1. 获取 Bark Key
 
